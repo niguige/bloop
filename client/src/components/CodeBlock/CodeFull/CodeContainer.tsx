@@ -1,25 +1,29 @@
-import { Align, FixedSizeList } from 'react-window';
 import React, {
   Dispatch,
   memo,
   SetStateAction,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
-  useRef,
+  useState,
 } from 'react';
-import CodeLine from '../Code/CodeLine';
+import { SearchContext } from '../../../context/searchContext';
 import { Token as TokenType } from '../../../types/prism';
 import { hashCode, propsAreShallowEqual } from '../../../utils';
-import { TokenInfoItem } from '../../../types/results';
-import { getOffsetForIndexAndAlignment } from '../../../utils/scrollUtils';
-import Token from './Token';
+import { Range, TokenInfoType, TokenInfoWrapped } from '../../../types/results';
+import { getTokenInfo } from '../../../services/api';
+import { MAX_LINES_BEFORE_VIRTUALIZE } from '../../../consts/code';
+import { mapTokenInfo } from '../../../mappers/results';
+import { AppNavigationContext } from '../../../context/appNavigationContext';
+import { FileHighlightsContext } from '../../../context/fileHighlightsContext';
+import CodeContainerVirtualized from './CodeContainerVirtualized';
+import CodeContainerFull from './CodeContainerFull';
 import { Metadata, BlameLine } from './index';
 
 type Props = {
   language: string;
   metadata: Metadata;
-  scrollElement: HTMLDivElement | null;
   relativePath: string;
   repoPath: string;
   repoName: string;
@@ -35,62 +39,107 @@ type Props = {
   >;
   scrollToIndex?: number[];
   searchTerm: string;
-  onRefDefClick: (item: TokenInfoItem, filePath: string) => void;
+  highlightColor?: string | null;
+  onRefDefClick: (
+    lineNum: number,
+    filePath: string,
+    type: TokenInfoType,
+    tokenName: string,
+    tokenRange: string,
+  ) => void;
   width: number;
   height: number;
 };
 
 const CodeContainer = ({
   tokens,
-  foldableRanges,
-  foldedLines,
-  blameLines,
-  metadata,
-  toggleBlock,
   setCurrentSelection,
-  scrollToIndex,
-  searchTerm,
-  language,
-  repoName,
   relativePath,
+  repoName,
   repoPath,
   onRefDefClick,
-  width,
-  height,
+  language,
+  ...otherProps
 }: Props) => {
-  const ref = useRef<FixedSizeList>(null);
-  const listProps = useMemo(
-    () => ({
-      width,
-      height,
-      itemSize: 20,
-      itemCount: tokens.length,
-    }),
-    [width, height, tokens.length],
+  const [tokenInfo, setTokenInfo] = useState<TokenInfoWrapped>({
+    data: { references: [], definitions: [] },
+    hoverableRange: null,
+    tokenRange: null,
+    isLoading: false,
+    lineNumber: -1,
+  });
+  const { selectedBranch } = useContext(SearchContext.SelectedBranch);
+  const { navigatedItem } = useContext(AppNavigationContext);
+  const { fileHighlights } = useContext(FileHighlightsContext);
+
+  const getHoverableContent = useCallback(
+    (hoverableRange: Range, tokenRange: Range, lineNumber?: number) => {
+      if (hoverableRange && relativePath) {
+        setTokenInfo({
+          data: { references: [], definitions: [] },
+          hoverableRange,
+          tokenRange,
+          lineNumber,
+          isLoading: true,
+        });
+        getTokenInfo(
+          relativePath,
+          repoPath,
+          hoverableRange.start,
+          hoverableRange.end,
+          selectedBranch ? selectedBranch : undefined,
+        )
+          .then((data) => {
+            setTokenInfo({
+              data: mapTokenInfo(data.data, relativePath),
+              hoverableRange,
+              tokenRange,
+              lineNumber,
+              isLoading: false,
+            });
+          })
+          .catch(() => {
+            setTokenInfo({
+              data: { references: [], definitions: [] },
+              hoverableRange,
+              tokenRange,
+              lineNumber,
+              isLoading: false,
+            });
+          });
+      }
+    },
+    [relativePath, selectedBranch],
   );
 
   useEffect(() => {
-    if (scrollToIndex && ref.current) {
-      let scrollToItem = scrollToIndex[0];
-      let align: Align = 'center';
-      let multiline = scrollToIndex[1] && scrollToIndex[0] !== scrollToIndex[1];
-      if (multiline && scrollToIndex[1] - scrollToIndex[0] < 8) {
-        scrollToItem =
-          scrollToIndex[0] +
-          Math.floor((scrollToIndex[1] - scrollToIndex[0]) / 2);
-      } else if (multiline) {
-        align = 'start';
-      }
-      scrollToItem = Math.max(0, Math.min(scrollToItem, tokens.length - 1));
-      const scrollOffset = getOffsetForIndexAndAlignment(
-        listProps,
-        scrollToItem,
-        align,
-        0,
-      );
-      ref.current.scrollTo(scrollOffset);
+    if (navigatedItem?.pathParams?.tokenRange) {
+      const [start, end] = navigatedItem?.pathParams?.tokenRange
+        .split('_')
+        .map((l) => Number(l));
+      getHoverableContent({ start, end }, { start, end });
     }
-  }, [scrollToIndex, listProps]);
+  }, [navigatedItem?.pathParams?.tokenRange, getHoverableContent]);
+
+  const handleRefsDefsClick = useCallback(
+    (
+      lineNum: number,
+      filePath: string,
+      type: TokenInfoType,
+      tokenName: string,
+      tokenRange: string,
+    ) => {
+      setTokenInfo({
+        data: { references: [], definitions: [] },
+        hoverableRange: null,
+        tokenRange: null,
+        isLoading: false,
+        lineNumber: -1,
+      });
+      onRefDefClick(lineNum, filePath, type, tokenName, tokenRange);
+    },
+    [onRefDefClick],
+  );
 
   const pathHash = useMemo(
     () => (relativePath ? hashCode(relativePath) : ''),
@@ -116,44 +165,36 @@ const CodeContainer = ({
     });
   }, []);
 
-  return (
-    <FixedSizeList ref={ref} {...listProps}>
-      {({ index, style }) => (
-        <CodeLine
-          key={pathHash + '-' + index.toString()}
-          lineNumber={index}
-          lineFoldable={!!foldableRanges[index]}
-          handleFold={toggleBlock}
-          showLineNumbers={true}
-          lineHidden={!!foldedLines[index]}
-          blameLine={blameLines[index]}
-          blame={!!metadata.blame?.length}
-          hoverEffect
-          onMouseSelectStart={onMouseSelectStart}
-          onMouseSelectEnd={onMouseSelectEnd}
-          shouldHighlight={
-            !!scrollToIndex &&
-            index >= scrollToIndex[0] &&
-            index <= scrollToIndex[1]
-          }
-          searchTerm={searchTerm}
-          stylesGenerated={style}
-        >
-          {tokens[index].map((token, i) => (
-            <Token
-              key={`cell-${index}-${i}`}
-              lineHoverRanges={metadata.hoverableRanges[index]}
-              language={language}
-              token={token}
-              repoName={repoName}
-              relativePath={relativePath}
-              repoPath={repoPath}
-              onRefDefClick={onRefDefClick}
-            />
-          ))}
-        </CodeLine>
-      )}
-    </FixedSizeList>
+  return tokens.length > MAX_LINES_BEFORE_VIRTUALIZE ? (
+    <CodeContainerVirtualized
+      pathHash={pathHash}
+      onMouseSelectStart={onMouseSelectStart}
+      onMouseSelectEnd={onMouseSelectEnd}
+      tokens={tokens}
+      getHoverableContent={getHoverableContent}
+      tokenInfo={tokenInfo}
+      handleRefsDefsClick={handleRefsDefsClick}
+      repoName={repoName}
+      language={language}
+      relativePath={relativePath}
+      highlights={fileHighlights[relativePath]}
+      {...otherProps}
+    />
+  ) : (
+    <CodeContainerFull
+      pathHash={pathHash}
+      onMouseSelectStart={onMouseSelectStart}
+      onMouseSelectEnd={onMouseSelectEnd}
+      tokens={tokens}
+      getHoverableContent={getHoverableContent}
+      tokenInfo={tokenInfo}
+      handleRefsDefsClick={handleRefsDefsClick}
+      repoName={repoName}
+      language={language}
+      relativePath={relativePath}
+      highlights={fileHighlights[relativePath]}
+      {...otherProps}
+    />
   );
 };
 

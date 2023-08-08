@@ -1,28 +1,43 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import * as Sentry from '@sentry/react';
+import { Trans } from 'react-i18next';
 import FileIcon from '../../components/FileIcon';
 import Breadcrumbs from '../../components/Breadcrumbs';
-import IdeNavigation from '../../components/IdeNavigation';
 import CodeFull from '../../components/CodeBlock/CodeFull';
 import { getHoverables } from '../../services/api';
 import { mapFileResult, mapRanges } from '../../mappers/results';
-import ShareFileModal from '../../components/ShareFileModal';
 import { FullResult } from '../../types/results';
 import {
   breadcrumbsItemPath,
+  humanFileSize,
   isWindowsPath,
   splitPathForBreadcrumbs,
 } from '../../utils';
 import ErrorFallback from '../../components/ErrorFallback';
 import useAppNavigation from '../../hooks/useAppNavigation';
-import { FileTreeFileType } from '../../types';
-import { getFileName } from '../../utils/file';
 import FileMenu from '../../components/FileMenu';
 import SkeletonItem from '../../components/SkeletonItem';
+import IpynbRenderer from '../../components/IpynbRenderer';
+import useConversation from '../../hooks/useConversation';
+import Button from '../../components/Button';
+import { Sparkles } from '../../icons';
+import { ChatContext } from '../../context/chatContext';
+import { UIContext } from '../../context/uiContext';
+import FileExplanation from './FileExplanation';
 
 type Props = {
   data: any;
   isLoading: boolean;
+  repoName: string;
+  selectedBranch: string | null;
+  recordId: number;
+  threadId: string;
 };
 
 const SIDEBAR_WIDTH = 324;
@@ -32,14 +47,24 @@ const HORIZONTAL_PADDINGS = 64;
 const VERTICAL_PADDINGS = 32;
 const BREADCRUMBS_HEIGHT = 47;
 
-const ResultFull = ({ data, isLoading }: Props) => {
-  // const [activeTab, setActiveTab] = useState(0);
-  // const [scrollableElement, setScrollableElement] =
-  //   useState<HTMLDivElement | null>(null);
-
-  const [isShareOpen, setShareOpen] = useState(false);
+const ResultFull = ({
+  data,
+  isLoading,
+  selectedBranch,
+  recordId,
+  threadId,
+}: Props) => {
   const { navigateFullResult, navigateRepoPath } = useAppNavigation();
   const [result, setResult] = useState<FullResult | null>(null);
+  const { data: answer } = useConversation(threadId, recordId);
+  const {
+    setSubmittedQuery,
+    setChatOpen,
+    setSelectedLines,
+    setConversation,
+    setThreadId,
+  } = useContext(ChatContext.Setters);
+  const { setRightPanelOpen } = useContext(UIContext.RightPanel);
 
   useEffect(() => {
     if (!data || data?.data?.[0]?.kind !== 'file') {
@@ -47,32 +72,19 @@ const ResultFull = ({ data, isLoading }: Props) => {
     }
 
     const item = data.data[0];
-    const mappedResult = mapFileResult({
-      ...item,
-      data: {
-        ...item.data,
-        siblings: [
-          ...item.data.siblings,
-          {
-            name: getFileName(item.data.relative_path),
-            entry_data: {
-              File: {
-                lang: item.data.lang,
-              },
-            },
-            currentFile: true,
-          },
-        ],
-      },
-    });
+    const mappedResult = mapFileResult(item);
     setResult(mappedResult);
-    getHoverables(item.data.relative_path, item.data.repo_ref).then((data) => {
+    getHoverables(
+      item.data.relative_path,
+      item.data.repo_ref,
+      selectedBranch ? selectedBranch : undefined,
+    ).then((data) => {
       setResult((prevState) => ({
         ...prevState!,
         hoverableRanges: mapRanges(data.ranges),
       }));
     });
-  }, [data, isLoading]);
+  }, [data, isLoading, selectedBranch]);
 
   const navigateTo = useCallback(
     (path: string, isFile: boolean) => {
@@ -80,7 +92,7 @@ const ResultFull = ({ data, isLoading }: Props) => {
         return;
       }
       if (isFile) {
-        navigateFullResult(result.repoName, path);
+        navigateFullResult(path);
       } else {
         navigateRepoPath(result.repoName, path);
       }
@@ -109,67 +121,72 @@ const ResultFull = ({ data, isLoading }: Props) => {
   }, [result?.relativePath, isLoading]);
 
   const currentPath = useMemo(() => {
-    const pathParts = result?.relativePath.split('/') || [];
+    const pathParts = result?.relativePath?.split('/') || [];
     return pathParts.length > 1 ? pathParts.slice(0, -1).join('/') + '/' : '';
   }, [result]);
 
-  // const scrollRef = useRef<HTMLDivElement>(null);
-  //
-  // useEffect(() => {
-  //   setScrollableElement(scrollRef.current);
-  // });
+  const handleExplain = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
+      e.stopPropagation();
+      if (!result) {
+        return;
+      }
+      setConversation([]);
+      setThreadId('');
+      const endLine = result.code.split('\n').length;
+      setSelectedLines([1, endLine]);
+      setRightPanelOpen(false);
+      setSubmittedQuery(`#explain_${result.relativePath}:1-${endLine}`);
+      setChatOpen(true);
+    },
+    [result?.code, result?.relativePath],
+  );
 
   return (
     <>
-      <IdeNavigation
-        repoName={result?.repoName || ''}
-        files={result?.fileTree || []}
-        branches={[]}
-        versions={[]}
-        initialBranch={0}
-        initialVersion={0}
-        currentPath={currentPath}
-        onFileClick={(p, type) => {
-          navigateTo(p, type === FileTreeFileType.FILE);
-        }}
-      />
       <div className="flex-1 overflow-auto w-full box-content flex flex-col">
         <div className="w-full flex flex-col overflow-auto flex-1">
           <div
-            className={`w-full border-b border-bg-border flex justify-between py-3 px-8 select-none`}
+            className={`w-full border-b border-bg-border flex justify-between py-3 px-8`}
           >
-            <div className="flex items-center gap-1 overflow-hidden">
-              <FileIcon filename={result?.relativePath.slice(-5) || ''} />
+            <div className="flex items-center gap-1 overflow-hidden w-full">
+              <FileIcon filename={result?.relativePath?.slice(-5) || ''} />
               {!!result && !!breadcrumbs.length ? (
-                <Breadcrumbs
-                  pathParts={breadcrumbs}
-                  activeStyle="secondary"
-                  path={result.relativePath || ''}
-                />
+                <div className="flex-1">
+                  <Breadcrumbs
+                    pathParts={breadcrumbs}
+                    activeStyle="secondary"
+                    path={result.relativePath || ''}
+                  />
+                </div>
               ) : (
                 <div className="w-48 h-4">
                   <SkeletonItem />
                 </div>
               )}
             </div>
-            {/*<div className="flex gap-2">*/}
-            {/*<SelectToggleButton onlyIcon title="Star">*/}
-            {/*  <Star />*/}
-            {/*</SelectToggleButton>*/}
-            {/*<Button variant="primary" onClick={() => setShareOpen(true)}>*/}
-            {/*  Share*/}
-            {/*  <ArrowBoxOut />*/}
-            {/*</Button>*/}
-            {/*</div>*/}
-            <FileMenu
-              relativePath={result?.relativePath || ''}
-              repoPath={result?.repoPath || ''}
-            />
+            <div className="flex-shrink-0 flex items-center gap-2">
+              <p className="code-s flex-shrink-0 text-label-base">
+                {result?.code.split('\n').length} lines ({result?.loc} loc) ·{' '}
+                {result?.size ? humanFileSize(result?.size) : ''}
+              </p>
+              <Button size="tiny" onClick={handleExplain}>
+                <Sparkles raw sizeClassName="w-3.5 h-3.5" />
+                <Trans>Explain</Trans>
+              </Button>
+              <FileMenu
+                relativePath={result?.relativePath || ''}
+                repoPath={result?.repoPath || ''}
+              />
+            </div>
           </div>
-          <div className="overflow-scroll flex-1">
-            <div className={`flex py-3 px-8 h-full`}>
+          <div
+            className="overflow-scroll flex-1"
+            id="result-full-code-container"
+          >
+            <div className={`flex py-3 pl-2 h-full`}>
               {!result ? (
-                <div className="w-full h-full flex flex-col gap-3">
+                <div className="w-full h-full flex flex-col gap-3 pl-4">
                   <div className="h-4 w-48">
                     <SkeletonItem />
                   </div>
@@ -195,13 +212,14 @@ const ResultFull = ({ data, isLoading }: Props) => {
                     <SkeletonItem />
                   </div>
                 </div>
+              ) : result.language === 'jupyter notebook' ? (
+                <IpynbRenderer data={result.code} />
               ) : (
                 <CodeFull
                   code={result.code}
                   language={result.language}
                   repoPath={result.repoPath}
                   relativePath={result.relativePath}
-                  isOnResultPage
                   metadata={{
                     hoverableRanges: result.hoverableRanges,
                     lexicalBlocks: [],
@@ -224,13 +242,12 @@ const ResultFull = ({ data, isLoading }: Props) => {
           </div>
         </div>
       </div>
-      <ShareFileModal
-        isOpen={isShareOpen}
-        onClose={() => setShareOpen(false)}
-        result={result}
-        filePath={result?.relativePath || ''}
-        breadcrumbs={breadcrumbs}
-      />
+      {!!answer && (
+        <FileExplanation
+          markdown={answer.results}
+          repoName={result?.repoName || ''}
+        />
+      )}
     </>
   );
 };

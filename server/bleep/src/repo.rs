@@ -1,6 +1,8 @@
 use anyhow::Context;
+use regex::RegexSet;
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
+    collections::BTreeSet,
     fmt::{self, Display},
     path::{Path, PathBuf},
     str::FromStr,
@@ -9,26 +11,10 @@ use std::{
 };
 use tracing::debug;
 
-use crate::state::{get_relative_path, pretty_write_file};
+use crate::state::get_relative_path;
 
 pub(crate) mod iterator;
 use iterator::language;
-
-pub(crate) type FileCache = Arc<scc::HashMap<PathBuf, FreshValue<String>>>;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FreshValue<T> {
-    // default value is `false` on deserialize
-    #[serde(skip)]
-    pub(crate) fresh: bool,
-    pub(crate) value: T,
-}
-
-impl<T> From<T> for FreshValue<T> {
-    fn from(value: T) -> Self {
-        Self { fresh: true, value }
-    }
-}
 
 // Types of repo
 #[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Clone, Debug)]
@@ -200,6 +186,47 @@ impl<'de> Deserialize<'de> for RepoRef {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchFilter {
+    All,
+    Head,
+    Select(Vec<String>),
+}
+
+impl BranchFilter {
+    pub(crate) fn patch(&self, old: Option<&BranchFilter>) -> Option<BranchFilter> {
+        let Some(BranchFilter::Select(ref old_list)) = old
+        else {
+	    return Some(self.clone());
+	};
+
+        let BranchFilter::Select(new_list) = self
+        else {
+	    return Some(self.clone());
+	};
+
+        let mut updated = old_list.iter().collect::<BTreeSet<_>>();
+        updated.extend(new_list);
+
+        Some(BranchFilter::Select(updated.into_iter().cloned().collect()))
+    }
+}
+
+impl From<&BranchFilter> for iterator::BranchFilter {
+    fn from(value: &BranchFilter) -> Self {
+        match value {
+            BranchFilter::All => iterator::BranchFilter::All,
+            BranchFilter::Head => iterator::BranchFilter::Head,
+            BranchFilter::Select(regexes) => {
+                let mut regexes = regexes.clone();
+                regexes.push("HEAD".into());
+                iterator::BranchFilter::Select(RegexSet::new(regexes).unwrap())
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Repository {
     pub disk_path: PathBuf,
@@ -208,6 +235,7 @@ pub struct Repository {
     pub last_commit_unix_secs: u64,
     pub last_index_unix_secs: u64,
     pub most_common_lang: Option<String>,
+    pub branch_filter: Option<BranchFilter>,
 }
 
 impl Repository {
@@ -245,24 +273,25 @@ impl Repository {
             disk_path,
             remote,
             most_common_lang: None,
+            branch_filter: None,
         }
     }
 
     /// Pre-scan the repository to provide supporting metadata for a
     /// new indexing operation
-    pub async fn get_repo_metadata(&self) -> Result<Arc<RepoMetadata>, RepoError> {
+    pub async fn get_repo_metadata(&self) -> Arc<RepoMetadata> {
         let last_commit_unix_secs = gix::open(&self.disk_path)
             .context("failed to open git repo")
-            .and_then(|repo| Ok(repo.head()?.peel_to_commit_in_place()?.time()?.seconds()))
-            .unwrap_or(0) as u64;
+            .and_then(|repo| Ok(repo.head()?.peel_to_commit_in_place()?.time()?.seconds))
+            .ok();
 
         let langs = Default::default();
 
-        Ok(RepoMetadata {
+        RepoMetadata {
             last_commit_unix_secs,
             langs,
         }
-        .into())
+        .into()
     }
 
     /// Marks the repository for removal on the next sync
@@ -277,37 +306,24 @@ impl Repository {
         self.sync_status = SyncStatus::Queued;
     }
 
-    pub(crate) fn sync_done_with(&mut self, metadata: Arc<RepoMetadata>) {
+    pub(crate) fn sync_done_with(
+        &mut self,
+        new_branch_filters: Option<&BranchFilter>,
+        metadata: Arc<RepoMetadata>,
+    ) {
         self.last_index_unix_secs = get_unix_time(SystemTime::now());
-        self.last_commit_unix_secs = metadata.last_commit_unix_secs;
-        self.most_common_lang = metadata.langs.most_common_lang().map(|l| l.to_string());
-        self.sync_status = SyncStatus::Done;
-    }
+        self.last_commit_unix_secs = metadata.last_commit_unix_secs.unwrap_or(0);
+        self.most_common_lang = metadata
+            .langs
+            .most_common_lang()
+            .map(|l| l.to_string())
+            .or_else(|| self.most_common_lang.take());
 
-    fn file_cache_path(&self, index_dir: &Path) -> PathBuf {
-        let path_hash = blake3::hash(self.disk_path.to_string_lossy().as_bytes()).to_string();
-        index_dir.join(path_hash).with_extension("json")
-    }
-
-    pub(crate) fn open_file_cache(&self, index_dir: &Path) -> Result<FileCache, RepoError> {
-        let file_name = self.file_cache_path(index_dir);
-        match std::fs::File::open(file_name) {
-            Ok(state) => Ok(Arc::new(serde_json::from_reader(state)?)),
-            Err(_) => Ok(Default::default()),
+        if let Some(bf) = new_branch_filters {
+            self.branch_filter = bf.patch(self.branch_filter.as_ref());
         }
-    }
 
-    pub(crate) fn save_file_cache(
-        &self,
-        index_dir: &Path,
-        cache: FileCache,
-    ) -> Result<(), RepoError> {
-        let file_name = self.file_cache_path(index_dir);
-        pretty_write_file(file_name, cache.as_ref())
-    }
-
-    pub(crate) fn delete_file_cache(&self, index_dir: &Path) -> Result<(), RepoError> {
-        Ok(std::fs::remove_file(self.file_cache_path(index_dir))?)
+        self.sync_status = SyncStatus::Done;
     }
 }
 
@@ -319,20 +335,41 @@ fn get_unix_time(time: SystemTime) -> u64 {
 
 #[derive(Debug)]
 pub struct RepoMetadata {
-    pub last_commit_unix_secs: u64,
+    pub last_commit_unix_secs: Option<u64>,
     pub langs: language::LanguageInfo,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStatus {
+    /// There was an error during last sync & index
     Error { message: String },
+
+    /// Repository is not yet managed by bloop
     Uninitialized,
+
+    /// Removed by the user
     Removed,
-    Syncing,
+
+    /// The user requested cancelling the process
+    Cancelling,
+
+    /// Last sync & index cancelled by the user
+    Cancelled,
+
+    /// Queued for sync & index
     Queued,
+
+    /// Active VCS operation in progress
+    Syncing,
+
+    /// Active indexing in progress
     Indexing,
+
+    /// VCS remote has been removed
     RemoteRemoved,
+
+    /// Successfully indexed
     Done,
 }
 

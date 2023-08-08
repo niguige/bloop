@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useState } from 'react';
 import { format } from 'date-fns';
+import { Trans, useTranslation } from 'react-i18next';
 import ChipButton from '../ChipButton';
 import { ArrowLeft, CloseSign } from '../../../icons';
 import NLInput from '../NLInput';
@@ -10,12 +11,12 @@ import {
 } from '../../../services/api';
 import { AllConversationsResponse } from '../../../types/api';
 import Conversation from '../Conversation';
-import {
-  ChatMessage,
-  ChatMessageAuthor,
-  ChatMessageType,
-} from '../../../types/general';
+import { ChatMessage, ChatMessageAuthor } from '../../../types/general';
 import { conversationsCache } from '../../../services/cache';
+import { mapLoadingSteps } from '../../../mappers/conversation';
+import { findElementInCurrentTab } from '../../../utils/domUtils';
+import { LocaleContext } from '../../../context/localeContext';
+import { getDateFnsLocale } from '../../../utils';
 import ConversationListItem from './ConversationListItem';
 
 type Props = {
@@ -25,6 +26,8 @@ type Props = {
   setConversation: (b: ChatMessage[]) => void;
   setThreadId: (b: string) => void;
   repoRef: string;
+  repoName: string;
+  handleNewConversation: () => void;
 };
 
 const AllConversations = ({
@@ -34,13 +37,17 @@ const AllConversations = ({
   setThreadId,
   setConversation,
   repoRef,
+  repoName,
+  handleNewConversation,
 }: Props) => {
+  const { t } = useTranslation();
   const [openItem, setOpenItem] = useState<ChatMessage[] | null>(null);
   const [conversations, setConversations] = useState<AllConversationsResponse>(
     [],
   );
   const [openThreadId, setOpenThreadId] = useState('');
   const [title, setTitle] = useState('');
+  const { locale } = useContext(LocaleContext);
 
   const fetchConversations = useCallback(() => {
     getAllConversations(repoRef).then(setConversations);
@@ -61,27 +68,23 @@ const AllConversations = ({
     getConversation(threadId).then((resp) => {
       const conv: ChatMessage[] = [];
       resp.forEach((m) => {
+        // @ts-ignore
         const userQuery = m.search_steps.find((s) => s.type === 'QUERY');
-        if (userQuery) {
-          conv.push({
-            author: ChatMessageAuthor.User,
-            text: userQuery.content,
-            isFromHistory: true,
-          });
-        }
+        conv.push({
+          author: ChatMessageAuthor.User,
+          text: m.query?.target?.Plain || userQuery?.content?.query || '',
+          isFromHistory: true,
+        });
         conv.push({
           author: ChatMessageAuthor.Server,
           isLoading: false,
-          type: ChatMessageType.Answer,
-          loadingSteps: m.search_steps?.map(
-            (s: { type: string; content: string }) => ({
-              ...s,
-              displayText: s.content,
-            }),
-          ),
+          loadingSteps: mapLoadingSteps(m.search_steps, t),
           text: m.conclusion,
-          results: m.results,
+          results: m.answer,
           isFromHistory: true,
+          queryId: m.id,
+          responseTimestamp: m.response_timestamp,
+          explainedFile: m.focused_chunk?.file_path,
         });
       });
       setTitle(conv[0].text || '');
@@ -102,15 +105,18 @@ const AllConversations = ({
             <ArrowLeft sizeClassName="w-4 h-4" />
           </ChipButton>
         )}
-        <p className="flex-1 body-m">{openItem ? title : 'Conversations'}</p>
+        <p className="flex-1 body-m ellipsis">
+          {openItem ? title : t('Conversations')}
+        </p>
         {!openItem && (
           <ChipButton
             onClick={() => {
               setHistoryOpen(false);
               setActive(true);
+              handleNewConversation();
             }}
           >
-            Create new
+            <Trans>Create new</Trans>
           </ChipButton>
         )}
         <ChipButton
@@ -130,6 +136,7 @@ const AllConversations = ({
               subtitle={format(
                 new Date(c.created_at * 1000),
                 'EEEE, MMMM d, h:m a',
+                getDateFnsLocale(locale),
               )}
               onClick={() => onClick(c.thread_id)}
               onDelete={() => onDelete(c.thread_id)}
@@ -141,13 +148,16 @@ const AllConversations = ({
         <div className="flex-1 px-4 py-2 overflow-auto pb-10">
           <Conversation
             conversation={openItem}
-            searchId={openThreadId}
+            threadId={openThreadId}
+            repoRef={repoRef}
             isLoading={false}
             isHistory
+            repoName={repoName}
+            onMessageEdit={() => {}}
           />
         </div>
       )}
-      <div className="backdrop-blur-6 bg-chat-bg-base/75 -mt-10">
+      <div className="backdrop-blur-6 bg-chat-bg-base/75 -mt-10 z-40">
         <div
           className="p-4"
           onClick={() => {
@@ -157,7 +167,7 @@ const AllConversations = ({
             }
             setHistoryOpen(false);
             setActive(true);
-            document.getElementById('question-input')?.focus();
+            findElementInCurrentTab('#question-input')?.focus();
           }}
         >
           <NLInput />

@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { Trans } from 'react-i18next';
 import { FileTreeFileType, RepositoryFile } from '../../types';
 import Accordion from '../Accordion';
 import { Papers } from '../../icons';
@@ -60,7 +61,7 @@ const RepositoryFiles = ({
     <Accordion
       title={
         currentPath === '' ? (
-          'Files'
+          <Trans>Files</Trans>
         ) : (
           <div className="flex-1 overflow-hidden">
             <Breadcrumbs pathParts={pathParts} path={currentPath} />
@@ -85,7 +86,7 @@ const RepositoryFiles = ({
         ) : undefined
       }
     >
-      <div className="flex flex-col divide-y divide-bg-border overflow-auto bg-bg-sub">
+      <div className="flex flex-col divide-y divide-bg-border overflow-auto bg-bg-sub select-none">
         {(maxInitialFiles && files.length > maxInitialFiles
           ? files.slice(maxInitialFiles)
           : files

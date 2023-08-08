@@ -1,15 +1,13 @@
 import React, { useCallback, useContext, useMemo, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import FileIcon from '../../FileIcon';
 import Code from '../Code';
 import { ResultClick, Snippet } from '../../../types/results';
 import Button from '../../Button';
 import BreadcrumbsPath from '../../BreadcrumbsPath';
-import { DropdownWithIcon } from '../../Dropdown';
-import { MoreHorizontal } from '../../../icons';
-import { getFileManagerName, isWindowsPath, splitPath } from '../../../utils';
 import { DeviceContext } from '../../../context/deviceContext';
-import { MenuItemType } from '../../../types/general';
 import { FileTreeFileType } from '../../../types';
+import FileMenu from '../../FileMenu';
 
 type Props = {
   snippets: Snippet[];
@@ -43,8 +41,8 @@ const CodeBlockSearch = ({
   hideDropdown,
   hideMatchCounter,
 }: Props) => {
+  const { t } = useTranslation();
   const [isExpanded, setExpanded] = useState(false);
-  const { os, openFolderInExplorer } = useContext(DeviceContext);
 
   const handleMouseUp = useCallback(
     (startLine?: number, endLine?: number) => {
@@ -58,7 +56,7 @@ const CodeBlockSearch = ({
         );
       }
     },
-    [onClick],
+    [onClick, repoName, filePath],
   );
 
   const totalMatches = useMemo(() => {
@@ -74,7 +72,7 @@ const CodeBlockSearch = ({
 
   return (
     <div className="w-full border border-bg-border rounded-4">
-      <div className="w-full flex justify-between rounded-tl-4 rounded-tr-4 bg-bg-shade py-1 px-3 h-11.5 border-b border-bg-border gap-2 select-none">
+      <div className="w-full flex justify-between rounded-tl-4 rounded-tr-4 bg-bg-shade px-3 h-13 border-b border-bg-border gap-2">
         <div className="flex items-center gap-2 max-w-[calc(100%-120px)] w-full">
           <FileIcon filename={filePath} />
           <BreadcrumbsPath
@@ -88,37 +86,13 @@ const CodeBlockSearch = ({
         <div className="flex gap-2 items-center flex-shrink-0">
           {!hideMatchCounter ? (
             <span className="body-s text-label-title">
-              {totalMatches} match{totalMatches > 1 ? 'es' : ''}
+              <Trans count={totalMatches}># match</Trans>
             </span>
           ) : (
             ''
           )}
           {!hideDropdown && !repoPath.startsWith('github') && (
-            <span>
-              <DropdownWithIcon
-                items={[
-                  {
-                    type: MenuItemType.DEFAULT,
-                    text: `View in ${getFileManagerName(os.type)}`,
-                    onClick: () => {
-                      openFolderInExplorer(
-                        repoPath +
-                          (isWindowsPath(repoPath) ? '\\' : '/') +
-                          (os.type === 'Darwin'
-                            ? filePath
-                            : splitPath(filePath)
-                                .slice(0, -1)
-                                .join(isWindowsPath(filePath) ? '\\' : '/')),
-                      );
-                    },
-                  },
-                ]}
-                icon={<MoreHorizontal />}
-                noChevron
-                btnSize="small"
-                btnOnlyIcon
-              />
-            </span>
+            <FileMenu repoPath={'local/' + repoPath} relativePath={filePath} />
           )}
         </div>
       </div>
@@ -193,10 +167,8 @@ const CodeBlockSearch = ({
               }}
             >
               {isExpanded
-                ? 'Show less'
-                : `Show ${hiddenMatches} more match${
-                    hiddenMatches > 1 ? 'es' : ''
-                  }`}
+                ? t('Show less')
+                : t(`Show # more match`, { count: hiddenMatches })}
             </Button>
           </div>
         )}

@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::MAIN_SEPARATOR,
     sync::Arc,
 };
 
@@ -148,6 +147,7 @@ pub struct FileResultData {
     relative_path: HighlightedString,
     repo_ref: String,
     lang: Option<String>,
+    branches: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -158,6 +158,9 @@ pub struct FileData {
     lang: Option<String>,
     contents: String,
     siblings: Vec<DirEntry>,
+    size: usize,
+    loc: usize,
+    sloc: usize,
 }
 
 #[derive(Serialize)]
@@ -470,6 +473,7 @@ impl ExecuteQuery for FileReader {
                     repo_name: f.repo_name,
                     repo_ref: f.repo_ref,
                     lang: f.lang,
+                    branches: f.branches,
                 })
             })
             .collect::<Vec<QueryResult>>();
@@ -583,9 +587,9 @@ impl ExecuteQuery for OpenReader {
         _q: &ApiQuery,
     ) -> Result<QueryResponse> {
         #[derive(Debug)]
-        struct Directive<'a> {
-            relative_path: &'a str,
-            repo_name: &'a str,
+        struct Directive {
+            relative_path: String,
+            repo_name: String,
         }
 
         let open_directives = queries
@@ -594,11 +598,11 @@ impl ExecuteQuery for OpenReader {
             .filter_map(|q| {
                 Some(Directive {
                     relative_path: match q.path.as_ref() {
-                        None => "",
-                        Some(parser::Literal::Plain(p)) => p,
+                        None => "".into(),
+                        Some(parser::Literal::Plain(p)) => p.to_string(),
                         Some(parser::Literal::Regex(..)) => return None,
                     },
-                    repo_name: q.repo.as_ref()?.as_plain()?,
+                    repo_name: q.repo.as_ref()?.as_plain()?.into(),
                 })
             })
             .collect::<SmallVec<[_; 2]>>();
@@ -622,14 +626,14 @@ impl ExecuteQuery for OpenReader {
                 // because the `BytesFilterCollector` operates on one field. So we sort through this
                 // later. It's unlikely that a search will use more than one open query.
                 relative_paths.iter().any(|rp| {
-                    let rp = rp.trim_end_matches(|c| c != MAIN_SEPARATOR);
+                    let rp = rp.trim_end_matches(|c| c != '/');
 
                     matches!(
                         // Trim trailing suffix and avoid returning results for an empty string
                         // (this means that the document we are looking at is the folder itself; a
                         // redundant result).
-                        relative_path.strip_prefix(rp).map(|p| p.trim_end_matches(MAIN_SEPARATOR)),
-                        Some(p) if !p.is_empty() && !p.contains(MAIN_SEPARATOR)
+                        relative_path.strip_prefix(rp).map(|p| p.trim_end_matches('/')),
+                        Some(p) if !p.is_empty() && !p.contains('/')
                     )
                 })
             },
@@ -648,8 +652,8 @@ impl ExecuteQuery for OpenReader {
         // Set of (repo_name, relative_path) that should be returned.
         let directories = open_directives
             .iter()
-            .filter(|d| d.relative_path.is_empty() || d.relative_path.ends_with(MAIN_SEPARATOR))
-            .map(|d| (d.repo_name, d.relative_path))
+            .filter(|d| d.relative_path.is_empty() || d.relative_path.ends_with('/'))
+            .map(|d| (&d.repo_name, &d.relative_path))
             .collect::<HashSet<_>>();
 
         // Iterate over each combination of (document, directive).
@@ -669,26 +673,35 @@ impl ExecuteQuery for OpenReader {
                         repo_ref: doc.repo_ref.to_owned(),
                         lang: doc.lang.clone(),
                         contents: doc.content.clone(),
+                        size: doc.content.len(),
+                        loc: doc.line_end_indices.len(),
+                        sloc: doc
+                            .line_end_indices
+                            .iter()
+                            .zip(doc.line_end_indices.iter().skip(1))
+                            .filter(|(&prev, &next)| next - prev != 1)
+                            .count()
+                            .saturating_add(1),
                         siblings: vec![],
                     });
 
                     continue;
                 }
 
-                let relative_path = base_name(directive.relative_path);
+                let relative_path = base_name(&directive.relative_path);
 
                 if let Some(entry) = doc
                     .relative_path
                     .strip_prefix(relative_path)
-                    .and_then(|s| s.split_inclusive(MAIN_SEPARATOR).next())
+                    .and_then(|s| s.split_inclusive('/').next())
                 {
                     dir_entries
-                        .entry((directive.repo_name, relative_path))
+                        .entry((&directive.repo_name, relative_path))
                         .or_insert_with(|| (doc.repo_ref.to_owned(), HashSet::default()))
                         .1
                         .insert(DirEntry {
                             name: entry.to_owned(),
-                            entry_data: if entry.contains(MAIN_SEPARATOR) {
+                            entry_data: if entry.contains('/') {
                                 EntryData::Directory
                             } else {
                                 EntryData::File {

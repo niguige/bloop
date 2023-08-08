@@ -1,4 +1,4 @@
-import { SymbolType, Range } from './results';
+import { SymbolType, Range, TokenInfoType } from './results';
 
 export interface RangeLine {
   byte: number;
@@ -126,7 +126,6 @@ export interface DirectoryFileEntryData {
 export interface DirectoryEntry {
   name: string;
   entry_data: 'Directory' | DirectoryFileEntryData;
-  currentFile?: boolean;
 }
 
 export interface File {
@@ -136,6 +135,9 @@ export interface File {
   contents: string;
   repo_ref: string;
   siblings: DirectoryEntry[];
+  size: number;
+  loc: number;
+  sloc: number;
 }
 
 export interface FileResponse {
@@ -183,10 +185,34 @@ export interface TokenInfoItem {
   data: TokenInfoDataItem[];
 }
 
+export type RefDefDataItem = {
+  kind: TokenInfoType;
+  range: {
+    start: {
+      byte: number;
+      line: number;
+      column: number;
+    };
+    end: {
+      byte: number;
+      line: number;
+      column: number;
+    };
+  };
+  snippet: {
+    data: string;
+    highlights: Range[];
+    tokenRange?: Range;
+    symbols: never[];
+    line_range: Range;
+  };
+};
+
 export interface TokenInfoResponse {
-  kind: 'reference' | 'definition';
-  references?: TokenInfoItem[];
-  definitions?: TokenInfoItem[];
+  data: {
+    file: string;
+    data: RefDefDataItem[];
+  }[];
 }
 
 export type AllConversationsResponse = {
@@ -195,11 +221,32 @@ export type AllConversationsResponse = {
   title: string;
 }[];
 
+type ProcStep = {
+  type: 'proc';
+  content: { query: string; paths: string[] };
+};
+
+type CodeStep = {
+  type: 'code';
+  content: { query: string };
+};
+
+type PathStep = {
+  type: 'path';
+  content: { query: string };
+};
+
+export type SearchStepType = ProcStep | CodeStep | PathStep;
+
 export type ConversationType = {
-  finished: boolean;
-  search_steps: { content: string; type: string }[];
+  id: string;
+  search_steps: SearchStepType[];
+  query: { target: { Plain: string } };
   conclusion: string;
-  results: any[];
+  answer: string;
+  paths: string[];
+  response_timestamp: string;
+  focused_chunk: { file_path: string } | null;
 };
 
 export interface SuggestionsResponse {

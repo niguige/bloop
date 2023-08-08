@@ -13,7 +13,6 @@ bloop:
   githubClientSecret: ""
   instanceDomain: ""
   answerApiUrl: ""
-  qdrantUrl: ""
   analyticsKey: ""
   analyticsKeyFE: ""
   analyticsDataPlane: ""
@@ -21,6 +20,7 @@ bloop:
   sentryDsnFE: ""
   #
   logLevel: info
+  maxThreads: 2
 
 image:
   repository: ""
@@ -95,7 +95,7 @@ qdrant:
   image:
     repository: qdrant/qdrant
     pullPolicy: IfNotPresent
-    tag: v1.1.1
+    tag: v1.3.2
 
   imagePullSecrets: []
   nameOverride: ""
@@ -186,6 +186,7 @@ qdrant:
 
   #modification example for configuration to overwrite defaults
   config:
+    telemetry_disabled: true
     cluster:
       enabled: true
       p2p:
@@ -193,4 +194,14 @@ qdrant:
       consensus:
         tick_period_ms: 100
     storage:
+      async_scorer: true
       snapshots_path: /qdrant/storage/snapshots
+      storage_path: /qdrant/storage/storage
+      on_disk_payload: true
+      wal:
+        wal_capacity_mb: 128
+        wal_segments_ahead: 8
+
+      optimizers:
+        memmap_threshold_kb: 1
+        flush_interval_sec: 1

@@ -1,5 +1,3 @@
-use std::path::MAIN_SEPARATOR;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use tantivy::{
@@ -9,11 +7,13 @@ use tantivy::{
 
 use super::{file::File, repo::Repo, DocumentRead};
 use crate::{
+    intelligence::TreeSitterFile,
     query::{
         compiler::Compiler,
         parser::{self, Query, Target},
     },
     symbol::SymbolLocations,
+    text_range::TextRange,
 };
 
 #[derive(Default, Debug, Clone)]
@@ -28,13 +28,21 @@ pub struct ContentDocument {
     pub branches: Option<String>,
 }
 
+impl ContentDocument {
+    pub fn hoverable_ranges(&self) -> Option<Vec<TextRange>> {
+        TreeSitterFile::try_build(self.content.as_bytes(), self.lang.as_ref()?)
+            .and_then(TreeSitterFile::hoverable_ranges)
+            .ok()
+    }
+}
+
 #[derive(Debug)]
 pub struct FileDocument {
     pub relative_path: String,
     pub repo_name: String,
     pub repo_ref: String,
     pub lang: Option<String>,
-    pub branches: Option<String>,
+    pub branches: String,
 }
 
 pub struct RepoDocument {
@@ -173,7 +181,7 @@ impl DocumentRead for FileReader {
         let repo_ref = read_text_field(&doc, schema.repo_ref);
         let repo_name = read_text_field(&doc, schema.repo_name);
         let lang = read_lang_field(&doc, schema.lang);
-        let branches = read_lang_field(&doc, schema.branches);
+        let branches = read_text_field(&doc, schema.branches);
 
         FileDocument {
             relative_path,
@@ -241,6 +249,7 @@ pub struct OpenDocument {
     pub repo_ref: String,
     pub lang: Option<String>,
     pub content: String,
+    pub line_end_indices: Vec<u32>,
 }
 
 #[async_trait]
@@ -278,6 +287,7 @@ impl DocumentRead for OpenReader {
     {
         Compiler::new()
             .literal(schema.repo_name, |q| q.repo.clone())
+            .literal(schema.branches, |q| q.branch.clone())
             .literal(schema.relative_path, |q| match &q.path {
                 // We coerce path searches to always return sibling files. These are sorted later
                 // by users of this reader.
@@ -299,6 +309,14 @@ impl DocumentRead for OpenReader {
         let repo_ref = read_text_field(&doc, schema.repo_ref);
         let lang = read_lang_field(&doc, schema.lang);
         let content = read_text_field(&doc, schema.content);
+        let line_end_indices = doc
+            .get_first(schema.line_end_indices)
+            .unwrap()
+            .as_bytes()
+            .unwrap()
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
 
         Self::Document {
             relative_path,
@@ -306,6 +324,7 @@ impl DocumentRead for OpenReader {
             repo_ref,
             lang,
             content,
+            line_end_indices,
         }
     }
 }
@@ -318,9 +337,7 @@ impl DocumentRead for OpenReader {
 /// - `"bar/" -> "bar/"`
 /// - `"foo.txt" -> ""`
 pub fn base_name(path: &str) -> &str {
-    path.rfind(MAIN_SEPARATOR)
-        .map(|i| &path[..i + 1])
-        .unwrap_or("")
+    path.rfind('/').map(|i| &path[..i + 1]).unwrap_or("")
 }
 
 fn read_text_field(doc: &tantivy::Document, field: Field) -> String {
@@ -350,9 +367,8 @@ mod test {
 
     #[test]
     fn test_base_name() {
-        let s = MAIN_SEPARATOR;
-        assert_eq!(base_name(&format!("bar{s}foo.txt")), format!("bar{s}"));
-        assert_eq!(base_name(&format!("bar{s}")), format!("bar{s}"));
+        assert_eq!(base_name(&format!("bar/foo.txt")), format!("bar/"));
+        assert_eq!(base_name(&format!("bar/")), format!("bar/"));
         assert_eq!(base_name("foo.txt"), "");
     }
 }

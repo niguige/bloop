@@ -21,9 +21,14 @@ fn main() {
 fn set_index_version() {
     use std::fs::{read_dir, read_to_string};
 
-    let model_directories = &["src/indexes", "src/intelligence/scope_resolution"];
+    let model_directories = &["src/intelligence/scope_resolution", "migrations"];
     let model_files = &[
-        "src/indexes.rs",
+        "sqlx-data.json",
+        "src/indexes/file.rs",
+        "src/semantic.rs",
+        "src/semantic/schema.rs",
+        "src/semantic/chunk.rs",
+        "src/indexes/schema.rs",
         "src/intelligence/scope_resolution.rs",
         "../languages.yml",
     ];

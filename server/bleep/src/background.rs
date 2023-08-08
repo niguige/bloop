@@ -3,7 +3,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
 use crate::{
-    repo::{RepoRef, SyncStatus},
+    repo::{BranchFilter, RepoRef, SyncStatus},
     Application, Configuration,
 };
 
@@ -24,6 +24,8 @@ type ProgressStream = tokio::sync::broadcast::Sender<Progress>;
 pub struct Progress {
     #[serde(rename = "ref")]
     reporef: RepoRef,
+    #[serde(rename = "b")]
+    branch_filter: Option<BranchFilter>,
     #[serde(rename = "ev")]
     event: ProgressEvent,
 }
@@ -41,10 +43,10 @@ pub struct SyncQueue {
     runner: BackgroundExecutor,
     active: Arc<scc::HashMap<RepoRef, Arc<SyncHandle>>>,
     tickets: Arc<Semaphore>,
-    queue: Arc<NotifyQueue>,
+    pub(crate) queue: Arc<NotifyQueue>,
 
     /// Report progress from indexing runs
-    progress: ProgressStream,
+    pub(crate) progress: ProgressStream,
 }
 
 #[derive(Clone)]
@@ -52,8 +54,7 @@ pub struct BackgroundExecutor {
     sender: flume::Sender<Task>,
 }
 
-pub struct BoundSyncQueue(Application, SyncQueue);
-
+pub struct BoundSyncQueue(pub(crate) Application, pub(crate) SyncQueue);
 impl BackgroundExecutor {
     fn start(config: Arc<Configuration>) -> Self {
         let (sender, receiver) = flume::unbounded();
@@ -73,9 +74,19 @@ impl BackgroundExecutor {
         _ = rayon::ThreadPoolBuilder::new()
             .spawn_handler(move |thread| {
                 let tokio_ref = tokio_ref.clone();
+
+                let thread_priority = if cfg!(feature = "ee") {
+                    // 0-100 low-high
+                    // pick mid-range for worker threads so we don't starve other threads
+                    thread_priority::ThreadPriority::Crossplatform(49u8.try_into().unwrap())
+                } else {
+                    // on the desktop it's full throttle, as number of cores is limited
+                    thread_priority::ThreadPriority::Max
+                };
+
                 std::thread::Builder::new()
                     .name("index-worker".to_owned())
-                    .spawn_with_priority(thread_priority::ThreadPriority::Max, move |_| {
+                    .spawn_with_priority(thread_priority, move |_| {
                         let _tokio = tokio_ref.enter();
                         thread.run()
                     })
@@ -131,24 +142,30 @@ impl SyncQueue {
             instance.runner.clone().spawn(async move {
                 while let (Ok(permit), next) = tokio::join!(
                     instance.tickets.clone().acquire_owned(),
-                    instance.queue.pop()
+                    instance
+                        .queue
+                        .pop_if(|h| !instance.active.contains(&h.reporef))
                 ) {
                     let active = Arc::clone(&instance.active);
-                    tokio::task::spawn(async move {
-                        info!(?next.reporef, "indexing");
-                        active
-                            .upsert_async(
-                                next.reporef.clone(),
-                                || next.clone(),
-                                |_, v| *v = next.clone(),
-                            )
-                            .await;
+                    match active
+                        .insert_async(next.reporef.clone(), next.clone())
+                        .await
+                    {
+                        Ok(_) => {
+                            tokio::task::spawn(async move {
+                                info!(?next.reporef, "indexing");
 
-                        let result = next.run(permit).await;
-                        _ = active.remove(&next.reporef);
+                                let result = next.run(permit).await;
+                                _ = active.remove(&next.reporef);
 
-                        debug!(?result, "sync finished");
-                    });
+                                debug!(?result, "sync finished");
+                            });
+                        }
+                        Err((_, next)) => {
+                            // this shouldn't happen, but we can handle it gracefully
+                            instance.queue.push(next).await
+                        }
+                    };
                 }
             });
         }
@@ -163,31 +180,108 @@ impl SyncQueue {
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Progress> {
         self.progress.subscribe()
     }
+
+    pub(crate) async fn read_queue(&self) -> Vec<QueuedRepoStatus> {
+        let mut output = vec![];
+        self.active
+            .scan_async(|_, handle| {
+                output.push(QueuedRepoStatus {
+                    reporef: handle.reporef.clone(),
+                    branch_filter: handle.new_branch_filters.clone(),
+                    state: QueueState::Active,
+                });
+            })
+            .await;
+
+        for handle in self.queue.get_list().await {
+            output.push(QueuedRepoStatus {
+                reporef: handle.reporef.clone(),
+                branch_filter: handle.new_branch_filters.clone(),
+                state: QueueState::Queued,
+            });
+        }
+
+        output
+    }
+}
+
+#[derive(serde::Serialize, Debug)]
+pub(crate) struct QueuedRepoStatus {
+    reporef: RepoRef,
+    branch_filter: Option<BranchFilter>,
+    state: QueueState,
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum QueueState {
+    Active,
+    Queued,
 }
 
 impl BoundSyncQueue {
-    /// Enqueue repos for syncing which aren't already being synced or
-    /// in the queue.
-    pub(crate) async fn sync_and_index(self, repositories: Vec<RepoRef>) {
+    /// Enqueue repos for syncing with the current configuration.
+    ///
+    /// Skips any repositories in the list which are already queued or being synced.
+    /// Returns the number of new repositories queued for syncing.
+    pub(crate) async fn enqueue_sync(self, repositories: Vec<RepoRef>) -> usize {
+        let mut num_queued = 0;
+
         for reporef in repositories {
             if self.1.queue.contains(&reporef).await || self.1.active.contains(&reporef) {
                 continue;
             }
 
             info!(%reporef, "queueing for sync");
-            let (handle, _) = SyncHandle::new(self.0.clone(), reporef, self.1.progress.clone());
+            let handle =
+                SyncHandle::new(self.0.clone(), reporef, self.1.progress.clone(), None).await;
             self.1.queue.push(handle).await;
+            num_queued += 1;
         }
+
+        num_queued
     }
 
-    /// Pull or clone an existing, or new repo, respectively.
-    pub(crate) async fn wait_for_sync_and_index(
-        self,
-        reporef: RepoRef,
-    ) -> anyhow::Result<SyncStatus> {
-        let (handle, finished) = SyncHandle::new(self.0.clone(), reporef, self.1.progress.clone());
+    /// Block until the repository sync & index process is complete.
+    ///
+    /// Returns the new status.
+    pub(crate) async fn block_until_synced(self, reporef: RepoRef) -> anyhow::Result<SyncStatus> {
+        let handle = SyncHandle::new(self.0.clone(), reporef, self.1.progress.clone(), None).await;
+        let finished = handle.notify_done();
         self.1.queue.push(handle).await;
         Ok(finished.recv_async().await?)
+    }
+
+    pub(crate) async fn remove(self, reporef: RepoRef) -> Option<()> {
+        let active = self
+            .1
+            .active
+            .update_async(&reporef, |_, v| {
+                v.pipes.remove();
+                v.set_status(|_| SyncStatus::Removed);
+            })
+            .await;
+
+        if active.is_none() {
+            self.0
+                .repo_pool
+                .update_async(&reporef, |_k, v| v.mark_removed())
+                .await?;
+
+            self.enqueue_sync(vec![reporef]).await;
+        }
+
+        Some(())
+    }
+
+    pub(crate) async fn cancel(&self, reporef: RepoRef) {
+        self.1
+            .active
+            .update_async(&reporef, |_, v| {
+                v.set_status(|_| SyncStatus::Cancelling);
+                v.pipes.cancel();
+            })
+            .await;
     }
 
     pub(crate) async fn startup_scan(self) -> anyhow::Result<()> {
@@ -196,7 +290,7 @@ impl BoundSyncQueue {
         let mut repos = vec![];
         repo_pool.scan_async(|k, _| repos.push(k.clone())).await;
 
-        self.sync_and_index(repos).await;
+        self.enqueue_sync(repos).await;
 
         Ok(())
     }

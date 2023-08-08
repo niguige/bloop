@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { Trans } from 'react-i18next';
 import { ChevronDownFilled, ChevronUpFilled } from '../../icons';
 import { ACCORDION_CHILDREN_ANIMATION } from '../../consts/animations';
 import Button from '../Button';
@@ -11,6 +12,7 @@ type Props = {
   children: React.ReactNode;
   shownItems?: React.ReactNode;
   defaultExpanded?: boolean;
+  onToggle?: (b: boolean) => void;
 };
 
 const zeroHeight = { height: 0 };
@@ -23,6 +25,7 @@ const Accordion = ({
   headerItems,
   shownItems,
   defaultExpanded = true,
+  onToggle,
 }: Props) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
   useEffect(() => {
@@ -35,9 +38,14 @@ const Accordion = ({
       } overflow-hidden relative`}
     >
       <span
-        className={`bg-bg-shade hover:bg-base-hover flex flex-row px-4 py-2 justify-between items-center
-        select-none gap-2 group cursor-pointer`}
-        onClick={() => setExpanded(!expanded)}
+        className={`bg-bg-shade hover:bg-base-hover flex flex-row px-4 h-13 justify-between items-center
+         gap-2 group cursor-pointer`}
+        onClick={() => {
+          if (!document.getSelection()?.toString()) {
+            setExpanded(!expanded);
+            onToggle?.(!expanded);
+          }
+        }}
       >
         <span className="flex flex-row items-center gap-2 flex-1 overflow-hidden">
           {icon}
@@ -72,7 +80,7 @@ const Accordion = ({
                 setExpanded((prev) => !prev);
               }}
             >
-              Show {expanded ? 'less' : 'more'}
+              <Trans>Show {expanded ? 'less' : 'more'}</Trans>
             </Button>
           </div>
         </div>

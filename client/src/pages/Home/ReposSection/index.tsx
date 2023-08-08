@@ -5,6 +5,7 @@ import React, {
   useEffect,
   useState,
 } from 'react';
+import { Trans } from 'react-i18next';
 import RepoCard from '../../../components/RepoCard';
 import { RepoType, SyncStatus } from '../../../types/general';
 import { DeviceContext } from '../../../context/deviceContext';
@@ -54,10 +55,10 @@ const ReposSection = ({ reposToShow, setReposToShow, repositories }: Props) => {
             return newRepos;
           });
         }
-        if (data.ev?.index_percent) {
+        if (Number.isInteger(data.ev?.index_percent)) {
           setCurrentlySyncingRepo({
             repoRef: data.ref,
-            percentage: data.ev?.index_percent || 1,
+            percentage: data.ev.index_percent,
           });
         }
       } catch {}
@@ -73,21 +74,19 @@ const ReposSection = ({ reposToShow, setReposToShow, repositories }: Props) => {
 
   return (
     <div className="p-8 flex-1 overflow-x-auto relative">
-      <h4 className="mb-3">All repositories</h4>
+      <h4 className="mb-3">
+        <Trans>All repositories</Trans>
+      </h4>
       <div className="flex flex-wrap gap-3.5 w-full relative items-start">
         {reposToShow.map(({ ref, ...r }, i) => (
           <RepoCard
             name={r.name}
             repoRef={ref}
             sync_status={r.sync_status}
-            last_update={r.last_index}
+            last_index={r.last_index}
             lang={r.most_common_lang}
             key={ref + i}
             provider={r.provider}
-            isSyncing={
-              currentlySyncingRepo?.repoRef === ref &&
-              currentlySyncingRepo?.percentage !== 100
-            }
             syncStatus={
               currentlySyncingRepo?.repoRef === ref
                 ? currentlySyncingRepo
@@ -96,6 +95,7 @@ const ReposSection = ({ reposToShow, setReposToShow, repositories }: Props) => {
             onDelete={() => {
               setReposToShow((prev) => prev.filter((r) => r.ref !== ref));
             }}
+            indexedBranches={r.branch_filter?.select}
           />
         ))}
       </div>
@@ -109,9 +109,13 @@ const ReposSection = ({ reposToShow, setReposToShow, repositories }: Props) => {
         <div className="flex w-full flex-col items-center justify-center gap-4 px-4 py-11 bg-bg-sub border border-bg-border rounded-md">
           <NoRepos />
           <div className="flex flex-col gap-3 items-center">
-            <p className="subhead-m text-label-title">No repositories</p>
+            <p className="subhead-m text-label-title">
+              <Trans>No repositories</Trans>
+            </p>
             <p className="body-s text-label-muted">
-              As soon as you add a repository it will appear here.
+              <Trans>
+                As soon as you add a repository it will appear here.
+              </Trans>
             </p>
           </div>
         </div>

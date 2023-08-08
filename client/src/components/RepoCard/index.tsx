@@ -1,27 +1,35 @@
-import { format as timeAgo } from 'timeago.js';
+import { formatDistanceToNow } from 'date-fns';
 import { MouseEvent, useCallback, useContext, useMemo } from 'react';
-import { GitHubLogo, MoreVertical, TrashCan } from '../../icons';
+import { Trans, useTranslation } from 'react-i18next';
+import {
+  GitHubLogo,
+  MoreVertical,
+  TrashCan,
+  CloseSign,
+  Eye,
+} from '../../icons';
 import { MenuItemType, SyncStatus } from '../../types/general';
 import FileIcon from '../FileIcon';
-import { getFileExtensionForLang } from '../../utils';
+import { getDateFnsLocale, getFileExtensionForLang } from '../../utils';
 import BarLoader from '../Loaders/BarLoader';
 import { UIContext } from '../../context/uiContext';
 import { TabsContext } from '../../context/tabsContext';
 import Dropdown from '../Dropdown/WithIcon';
-import { deleteRepo } from '../../services/api';
+import { deleteRepo, cancelSync, syncRepo } from '../../services/api';
 import { RepoSource } from '../../types';
+import { LocaleContext } from '../../context/localeContext';
 
 type Props = {
   name: string;
   description?: string;
   sync_status: SyncStatus;
-  last_update: string;
+  last_index: string;
   lang: string;
   repoRef: string;
   provider: 'local' | 'github';
-  isSyncing?: boolean;
   syncStatus?: { percentage: number } | null;
   onDelete: () => void;
+  indexedBranches?: string[];
 };
 
 export const STATUS_MAP = {
@@ -29,6 +37,8 @@ export const STATUS_MAP = {
   [SyncStatus.Removed]: { text: 'Removed', color: 'bg-red-500' },
   [SyncStatus.Uninitialized]: { text: 'Not synced', color: 'bg-bg-shade' },
   [SyncStatus.Queued]: { text: 'Queued...', color: 'bg-bg-shade' },
+  [SyncStatus.Cancelled]: { text: 'Cancelled', color: 'bg-bg-shade' },
+  [SyncStatus.Cancelling]: { text: 'Cancelling...', color: 'bg-yellow' },
   [SyncStatus.Indexing]: { text: 'Indexing...', color: 'bg-yellow' },
   [SyncStatus.Syncing]: { text: 'Cloning...', color: 'bg-yellow' },
   [SyncStatus.Done]: { text: 'Last updated ', color: 'bg-green-500' },
@@ -38,23 +48,25 @@ export const STATUS_MAP = {
 const RepoCard = ({
   name,
   sync_status,
-  last_update,
+  last_index,
   lang,
   provider,
-  isSyncing,
   syncStatus,
   repoRef,
   onDelete,
+  indexedBranches,
 }: Props) => {
-  const { isGithubConnected } = useContext(UIContext);
-  const { handleAddTab } = useContext(TabsContext);
+  const { t } = useTranslation();
+  const { isGithubConnected } = useContext(UIContext.GitHubConnected);
+  const { locale } = useContext(LocaleContext);
+  const { handleAddTab, tabs, handleRemoveTab } = useContext(TabsContext);
   const isGh = useMemo(() => provider === 'github', [provider]);
   const repoName = useMemo(() => {
     return !isGh ? name.split('/').reverse()[0] : name;
   }, [name, provider]);
 
   const handleClick = useCallback(() => {
-    if (!last_update || last_update === '1970-01-01T00:00:00Z') {
+    if (!last_index || last_index === '1970-01-01T00:00:00Z') {
       return;
     }
     handleAddTab(
@@ -62,21 +74,80 @@ const RepoCard = ({
       isGh ? repoRef : repoName,
       repoName,
       isGh ? RepoSource.GH : RepoSource.LOCAL,
+      indexedBranches?.[0],
     );
-  }, [repoName, provider, isGithubConnected, sync_status]);
+  }, [repoName, provider, isGithubConnected, sync_status, last_index]);
 
   const onRepoRemove = useCallback(
     (e: MouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
       deleteRepo(repoRef);
+      if (tabs.find((t) => t.key === repoRef)) {
+        handleRemoveTab(repoRef);
+      }
       onDelete();
+    },
+    [repoRef, tabs],
+  );
+
+  const onCancelSync = useCallback(
+    (e: MouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      cancelSync(repoRef);
     },
     [repoRef],
   );
 
+  const onSync = useCallback(
+    (e: MouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      syncRepo(repoRef);
+    },
+    [repoRef],
+  );
+
+  const dropdownItems = useMemo(() => {
+    const items = [
+      {
+        type: MenuItemType.DANGER,
+        text: t('Remove'),
+        icon: <TrashCan />,
+        onClick: onRepoRemove,
+      },
+    ];
+
+    if (
+      sync_status !== SyncStatus.Indexing &&
+      sync_status !== SyncStatus.Syncing &&
+      sync_status !== SyncStatus.Queued
+    ) {
+      items.push({
+        type: MenuItemType.DEFAULT,
+        text: t('Re-sync'),
+        icon: <Eye />,
+        onClick: onSync,
+      });
+    }
+
+    if (
+      sync_status === SyncStatus.Indexing ||
+      sync_status === SyncStatus.Syncing
+    ) {
+      items.push({
+        type: MenuItemType.DANGER,
+        text: t('Cancel'),
+        icon: <CloseSign />,
+        onClick: onCancelSync,
+      });
+    }
+
+    return items;
+  }, [sync_status, onRepoRemove, onSync, onCancelSync]);
+
   return (
-    <div
-      className={`bg-bg-base hover:bg-bg-base-hover border border-bg-border rounded-md p-4 w-67 h-36 group
+    <a
+      href="#"
+      className={`bg-bg-base hover:bg-bg-base-hover focus:bg-bg-base-hover border border-bg-border rounded-md p-4 w-67 h-36 group
        flex-shrink-0 flex flex-col justify-between cursor-pointer transition-all duration-150`}
       onClick={handleClick}
     >
@@ -87,7 +158,7 @@ const RepoCard = ({
           </span>
           <p className="break-all text-label-title pt-0.5">{repoName}</p>
         </div>
-        <div className="opacity-0 group-hover:opacity-100 transition-all duration-150">
+        <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-all duration-150">
           <Dropdown
             icon={<MoreVertical />}
             noChevron
@@ -96,26 +167,20 @@ const RepoCard = ({
             btnOnlyIcon
             btnVariant="secondary"
             dropdownPlacement="bottom-end"
-            items={[
-              {
-                type: MenuItemType.DANGER,
-                text: 'Remove',
-                icon: <TrashCan />,
-                onClick: onRepoRemove,
-              },
-            ]}
+            items={dropdownItems}
           />
         </div>
       </div>
       {(sync_status === SyncStatus.Indexing ||
         sync_status === SyncStatus.Syncing) &&
-      syncStatus &&
-      syncStatus.percentage < 100 ? (
+      syncStatus ? (
         <div className="flex flex-col gap-2">
-          <p className="body-s text-label-title">Indexing...</p>
+          <p className="body-s text-label-title">
+            <Trans>Indexing...</Trans>
+          </p>
           <BarLoader percentage={syncStatus.percentage} />
           <p className="caption text-label-muted">
-            {syncStatus.percentage}% complete
+            {syncStatus.percentage}% <Trans>complete</Trans>
           </p>
         </div>
       ) : (
@@ -133,13 +198,20 @@ const RepoCard = ({
             } rounded-full`}
           />
           <p className="select-none">
-            {STATUS_MAP[typeof sync_status === 'string' ? sync_status : 'error']
-              ?.text || sync_status}
-            {sync_status === 'done' && timeAgo(last_update)}
+            {t(
+              STATUS_MAP[
+                typeof sync_status === 'string' ? sync_status : 'error'
+              ]?.text || sync_status,
+            )}
+            {sync_status === 'done' &&
+              formatDistanceToNow(new Date(last_index), {
+                addSuffix: true,
+                ...(getDateFnsLocale(locale) || {}),
+              })}
           </p>
         </div>
       )}
-    </div>
+    </a>
   );
 };
 

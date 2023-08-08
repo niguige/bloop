@@ -2,6 +2,7 @@ import React, { MouseEvent, PropsWithChildren, useRef } from 'react';
 import Tippy, { TippyProps } from '@tippyjs/react/headless';
 import { useOnClickOutside } from '../../hooks/useOnClickOutsideHook';
 import { ExtendedMenuItemType, MenuItemType } from '../../types/general';
+import { useArrowKeyNavigation } from '../../hooks/useArrowNavigationHook';
 import ItemShared from './ContextMenuItem/ItemShared';
 import Item from './ContextMenuItem/Item';
 
@@ -17,6 +18,7 @@ export type ContextMenuLinkItem = {
   onDelete?: () => void;
   disabled?: boolean;
   tooltip?: string;
+  underline?: boolean;
 };
 
 export type ContextMenuItem =
@@ -32,6 +34,7 @@ export type ContextMenuItem =
       onDelete?: () => void;
       disabled?: boolean;
       tooltip?: string;
+      underline?: boolean;
     };
 
 type Props = {
@@ -42,12 +45,12 @@ type Props = {
   title?: string;
   handleClose: () => void;
   key?: string;
-  appendTo?: Element | 'parent';
+  appendTo?: TippyProps['appendTo'];
   size?: 'small' | 'medium' | 'large';
   dropdownPlacement?: TippyProps['placement'];
 };
 
-const sizesMap = {
+export const sizesMap = {
   small: 'w-44',
   medium: 'w-72',
   large: 'w-100',
@@ -65,7 +68,7 @@ const ContextMenu = ({
   size = 'medium',
   dropdownPlacement = 'bottom-start',
 }: PropsWithChildren<Props>) => {
-  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const contextMenuRef = useArrowKeyNavigation({ selectors: 'button' });
   useOnClickOutside(
     contextMenuRef,
     closeOnClickOutside ? handleClose : () => {},
@@ -93,6 +96,7 @@ const ContextMenu = ({
             onDelete={item.onDelete}
             disabled={item.disabled}
             tooltip={item.tooltip}
+            underline={item.underline}
           />
         );
       case ExtendedMenuItemType.DIVIDER:

@@ -1,4 +1,5 @@
 import React, { useContext, useEffect, useMemo, useState } from 'react';
+import { Trans } from 'react-i18next';
 import { SearchContext } from '../../context/searchContext';
 import { FileTreeFileType, Repository, RepoSource } from '../../types';
 import Skeleton from '../../components/Skeleton';
@@ -21,9 +22,9 @@ type Props = {
 const RepositoryPage = ({ repositoryData }: Props) => {
   const [repository, setRepository] = useState<Repository | undefined>();
   const [initialLoad, setInitialLoad] = useState(true);
-  const { setFilters } = useContext(SearchContext);
+  const { setFilters } = useContext(SearchContext.Filters);
   const { repositories } = useContext(RepositoriesContext);
-  const { isRightPanelOpen } = useContext(UIContext);
+  const { isRightPanelOpen } = useContext(UIContext.RightPanel);
 
   useEffect(() => {
     setInitialLoad(false);
@@ -94,7 +95,7 @@ const RepositoryPage = ({ repositoryData }: Props) => {
   return !repository || initialLoad ? (
     <Skeleton isRepoPage />
   ) : (
-    <div className="flex w-full">
+    <div className="flex flex-1 overflow-auto">
       <div
         className={`h-full bg-bg-base flex flex-col overflow-hidden relative overflow-y-auto ${
           isRightPanelOpen ? 'w-0' : 'w-[20.25rem]'
@@ -119,9 +120,11 @@ const RepositoryPage = ({ repositoryData }: Props) => {
                     }`}
                   />
                   <span className="ellipsis text-label-muted text-xs select-none">
-                    {statusTextColor?.text === 'Last updated '
-                      ? 'Synced'
-                      : statusTextColor?.text || repoStatus}
+                    <Trans>
+                      {statusTextColor?.text === 'Last updated '
+                        ? 'Synced'
+                        : statusTextColor?.text || repoStatus}
+                    </Trans>
                   </span>
                 </span>
               </span>
@@ -129,7 +132,7 @@ const RepositoryPage = ({ repositoryData }: Props) => {
           </span>
         </div>
         <div className="flex-1 flex">
-          <Filters isOpen={true} toggleOpen={() => {}} showHeader={false} />
+          <Filters forceOpen showHeader={false} />
         </div>
       </div>
       <div className="p-12 pb-32 w-full overflow-y-auto">

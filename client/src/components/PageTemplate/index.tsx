@@ -1,60 +1,44 @@
-import React, { useContext, useEffect, useMemo } from 'react';
+import React, { PropsWithChildren, useMemo } from 'react';
+import * as Sentry from '@sentry/react';
 import NavBar from '../NavBar';
 import StatusBar from '../StatusBar';
 import Chat from '../Chat';
-import { ChatContext } from '../../context/chatContext';
+import ErrorFallback from '../ErrorFallback';
+import { RenderPage } from '../../pages';
+import LeftSidebar from '../LeftSidebar';
 import Subheader from './Subheader';
 
 type Props = {
-  children: React.ReactNode;
-  withSearchBar: boolean;
-  renderPage:
-    | 'results'
-    | 'repo'
-    | 'full-result'
-    | 'nl-result'
-    | 'no-results'
-    | 'home'
-    | 'conversation-result';
+  renderPage: RenderPage;
 };
 
-const PageTemplate = ({ children, withSearchBar, renderPage }: Props) => {
-  const { setShowTooltip, setTooltipText } = useContext(ChatContext);
-
+const PageTemplate = ({ children, renderPage }: PropsWithChildren<Props>) => {
   const mainContainerStyle = useMemo(
-    () => ({ height: `calc(100vh - ${withSearchBar ? '9.5rem' : '6rem'})` }),
-    [withSearchBar],
+    () => ({
+      height: `calc(100vh - ${renderPage !== 'home' ? '9.5rem' : '6rem'})`,
+    }),
+    [renderPage],
   );
-
-  useEffect(() => {
-    let timerId: number;
-    if (renderPage === 'repo') {
-      timerId = window.setTimeout(() => {
-        setTooltipText('Ask me a question!');
-        setShowTooltip(true);
-      }, 1000);
-    } else {
-      setShowTooltip(false);
-    }
-    return () => {
-      clearTimeout(timerId);
-    };
-  }, [renderPage]);
 
   return (
     <div className="text-label-title">
       <NavBar />
       <div className="mt-8" />
-      {withSearchBar && <Subheader />}
+      {renderPage !== 'home' && <Subheader />}
       <div
         className="flex mb-16 w-screen overflow-hidden relative"
         style={mainContainerStyle}
       >
+        {renderPage !== 'article-response' &&
+          renderPage !== 'repo' &&
+          renderPage !== 'home' && <LeftSidebar renderPage={renderPage} />}
         {children}
-        {withSearchBar && <Chat />}
+        {renderPage !== 'home' && <Chat />}
       </div>
       <StatusBar />
     </div>
   );
 };
-export default PageTemplate;
+export default Sentry.withErrorBoundary(PageTemplate, {
+  fallback: (props) => <ErrorFallback {...props} />,
+});

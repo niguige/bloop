@@ -1,4 +1,5 @@
 import React, { useCallback, useContext, useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import DialogText from '../DialogText';
 import Button from '../../../components/Button';
 import { ArrowRight } from '../../../icons';
@@ -24,23 +25,10 @@ export const STEP_KEY = 'STEP_GITHUB_REPOS';
 let intervalId: number;
 
 const GithubReposStep = ({ handleNext, handleBack, disableSkip }: Props) => {
+  const { t } = useTranslation();
   const [repos, setRepos] = useState<RepoUi[]>([]);
-  const [nextButtonDisabled, setNextButtonDisabled] = useState(false);
   const [isLoading, setLoading] = useState(true);
-  const { onBoardingState, setOnBoardingState } = useContext(UIContext);
   const { repositories } = useContext(RepositoriesContext);
-
-  useEffect(() => {
-    if (repos.length) {
-      setOnBoardingState((prev) => ({
-        ...prev,
-        [STEP_KEY]: repos.filter((r) => r.selected).map((r) => r.ref),
-      }));
-      setNextButtonDisabled(!repos.filter((r) => r.selected).length);
-    } else {
-      setNextButtonDisabled(true);
-    }
-  }, [repos]);
 
   const handleSkip = useCallback(
     (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
@@ -55,18 +43,13 @@ const GithubReposStep = ({ handleNext, handleBack, disableSkip }: Props) => {
       repositories?.filter(
         (r: RepoType) => r.provider === RepoProvider.GitHub,
       ) || [];
-    const selectedRepos = onBoardingState[STEP_KEY];
 
     setRepos(
       githubRepos
         .map((r) => {
           const pathParts = splitPath(r.name);
-          let selected: boolean = selectedRepos?.length
-            ? !!selectedRepos.includes(r.ref)
-            : false;
           return {
             ...r,
-            selected,
             shortName: pathParts[pathParts.length - 1],
             folderName: pathParts[0],
             alreadySynced: ![
@@ -76,11 +59,11 @@ const GithubReposStep = ({ handleNext, handleBack, disableSkip }: Props) => {
           };
         })
         .sort((a, b) =>
-          a.folderName > b.folderName
+          a.folderName.toLowerCase() < b.folderName.toLowerCase()
             ? -1
-            : a.folderName < b.folderName
+            : a.folderName.toLowerCase() > b.folderName.toLowerCase()
             ? 1
-            : a.shortName < b.shortName
+            : a.shortName.toLowerCase() < b.shortName.toLowerCase()
             ? -1
             : 1,
         ),
@@ -97,8 +80,8 @@ const GithubReposStep = ({ handleNext, handleBack, disableSkip }: Props) => {
   return (
     <>
       <DialogText
-        title="Private repository"
-        description="Select any private repository you would like to sync"
+        title={t('Private repository')}
+        description={t('Select any private repository you would like to sync')}
       />
       <div className="flex flex-col overflow-auto">
         <SearchableRepoList
@@ -109,7 +92,7 @@ const GithubReposStep = ({ handleNext, handleBack, disableSkip }: Props) => {
         />
         {!disableSkip ? (
           <Button variant="secondary" onClick={handleSkip}>
-            Skip this step
+            <Trans>Skip this step</Trans>
             <ArrowRight />
           </Button>
         ) : null}

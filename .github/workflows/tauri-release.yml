@@ -6,8 +6,7 @@ on:
     paths:
       - ".github/workflows/tauri-release.yml"
   release:
-    types:
-      [published, prereleased]
+    types: [published]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,11 +17,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [
-          x86_64-unknown-linux-gnu,
-          x86_64-apple-darwin,
-          aarch64-apple-darwin,
-        ]
+        target:
+          [x86_64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin]
 
         include:
           - target: x86_64-unknown-linux-gnu
@@ -43,7 +39,7 @@ jobs:
         uses: nschloe/action-cached-lfs-checkout@v1
 
       - name: Setup nix
-        uses: cachix/install-nix-action@v20
+        uses: cachix/install-nix-action@v22
         with:
           github_access_token: "${{ secrets.GITHUB_TOKEN }}"
 
@@ -68,26 +64,20 @@ jobs:
           profile: minimal
           target: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "bloop-tauri-release-1"
-
-      - name: Run tests
-        run: |
-          cargo --locked test --verbose --release -p bloop 
-
-      - name: Check if Segment key exists
+      - name: Check if keys exist
         env:
-          segment_key: ${{ secrets.ANALYTICS_FE_WRITE_KEY_PROD }}
-          sentry_key_fe: ${{ secrets.SENTRY_DSN_FE }}
-        if: ${{ env.segment_key == '' || env.sentry_key_fe == '' }}
+          analytics_key: ${{ secrets.ANALYTICS_BE_WRITE_KEY_PROD }}
+          analytics_fe_key: ${{ secrets.ANALYTICS_FE_WRITE_KEY_PROD }}
+          sentry_dsn: ${{ secrets.SENTRY_DSN_BE }}
+          sentry_dsn_fe: ${{ secrets.SENTRY_DSN_FE }}
+        if: ${{ env.analytics_fe_key == '' || env.sentry_dsn_fe == '' || env.analytics_key == '' || env.sentry_dsn == ''}}
         run: exit 1
 
       - name: Set environment
-        run: echo "{\"analytics_key\":\"${{ secrets.ANALYTICS_BE_WRITE_KEY_PROD }}\",\"analytics_data_plane\":\"${{ secrets.ANALYTICS_DATA_PLANE_URL }}\",\"sentry_dsn_fe\":\"${{ secrets.SENTRY_DSN_FE }}\",\"sentry_dsn\":\"${{ secrets.SENTRY_DSN_BE }}\",\"analytics_key_fe\":\"${{ secrets.ANALYTICS_FE_WRITE_KEY_PROD }}\",\"github_client_id\":\"${{ secrets.APP_GITHUB_CLIENT_ID }}\",\"answer_api_url\":\"${{ secrets.ANSWER_API_URL }}\"}" > apps/desktop/src-tauri/config.json
+        run: echo "{\"analytics_key\":\"${{ secrets.ANALYTICS_BE_WRITE_KEY_PROD }}\",\"analytics_data_plane\":\"${{ secrets.ANALYTICS_DATA_PLANE_URL }}\",\"sentry_dsn_fe\":\"${{ secrets.SENTRY_DSN_FE }}\",\"sentry_dsn\":\"${{ secrets.SENTRY_DSN_BE }}\",\"analytics_key_fe\":\"${{ secrets.ANALYTICS_FE_WRITE_KEY_PROD }}\",\"github_client_id\":\"${{ secrets.APP_GITHUB_CLIENT_ID }}\",\"answer_api_url\":\"${{ secrets.ANSWER_API_URL }}\"}" > apps/desktop/src-tauri/config/config.json
 
       - name: Check environment is set
-        run: du -h apps/desktop/src-tauri/config.json
+        run: du -h apps/desktop/src-tauri/config/config.json
 
       - name: Set providerShortName in tauri.conf.json
         uses: jossef/action-set-json-field@v2
@@ -107,7 +97,7 @@ jobs:
         id: release-version
         run: echo "RELEASE_VERSION=$(cat apps/desktop/src-tauri/tauri.conf.json | jq '.package.version' | tr -d '"')" >> "$GITHUB_OUTPUT"
 
-      - uses: tauri-apps/tauri-action@dev
+      - uses: tauri-apps/tauri-action@cb58ba3f65bd456ee564376585a8400bf0b71f47
         env:
           ORT_LIB_LOCATION: ${{ github.workspace }}/lib/${{ matrix.target }}/onnxruntime
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -131,3 +121,12 @@ jobs:
           name: ${{ matrix.target }}-app
           path: target/${{ matrix.target }}/release/bundle
           retention-days: 5
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: |
+            target/${{ matrix.target }}/release/bundle/**/*.deb
+            target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            target/${{ matrix.target }}/release/bundle/**/*.dmg

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::prelude::*;
-use crate::{indexes::Indexes, repo::RepoRef, symbol::SymbolLocations, text_range::TextRange};
+use crate::{indexes::Indexes, repo::RepoRef, text_range::TextRange};
 
 use axum::{extract::Query, response::IntoResponse, Extension};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,9 @@ pub(super) struct HoverableRequest {
 
     /// The path to the file of interest, relative to the repo root
     relative_path: String,
+
+    /// Branch name to use for the lookup,
+    branch: Option<String>,
 }
 
 /// The response from the `hoverable` endpoint.
@@ -30,14 +33,20 @@ pub(super) async fn handle(
 ) -> impl IntoResponse {
     let repo_ref = &payload.repo_ref.parse::<RepoRef>().map_err(Error::user)?;
 
-    let document = match indexes.file.by_path(repo_ref, &payload.relative_path).await {
-        Ok(doc) => doc,
+    let document = match indexes
+        .file
+        .by_path(repo_ref, &payload.relative_path, payload.branch.as_deref())
+        .await
+    {
+        Ok(Some(doc)) => doc,
+        Ok(None) => return Err(Error::user("file not found").with_status(StatusCode::NOT_FOUND)),
         Err(e) => return Err(Error::user(e)),
     };
-    let ranges = match document.symbol_locations {
-        SymbolLocations::TreeSitter(graph) => graph.hoverable_ranges().collect(),
-        _ => return Err(Error::user("Intelligence is unavailable for this language")),
-    };
+
+    let ranges = document
+        .hoverable_ranges()
+        .ok_or(Error::user("no hoverable ranges for language"))?;
+
     Ok(json(HoverableResponse { ranges }))
 }
 

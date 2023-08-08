@@ -1,4 +1,5 @@
 import React, { ReactElement } from 'react';
+import { SearchStepType } from './api';
 import { RepoSource } from './index';
 
 export enum MenuItemType {
@@ -43,6 +44,8 @@ export type FilterType = {
 };
 
 export enum SyncStatus {
+  Cancelled = 'cancelled',
+  Cancelling = 'cancelling',
   Uninitialized = 'uninitialized',
   Queued = 'queued',
   Done = 'done',
@@ -67,10 +70,11 @@ export type RepoType = {
   last_index: string;
   sync_status: SyncStatus;
   most_common_lang: string;
+  branches: { name: string; last_commit_unix_secs: number }[];
+  branch_filter: { select: string[] } | null;
 };
 
 export type RepoUi = RepoType & {
-  selected: boolean;
   shortName: string;
   folderName: string;
   alreadySynced?: boolean;
@@ -92,6 +96,8 @@ export type UITabType = {
   name: string;
   repoName: string;
   source: RepoSource;
+  branch?: string | null;
+  navigationHistory: NavigationItem[];
 };
 
 export type TabHistoryType = {
@@ -141,7 +147,7 @@ type ChatMessageUser = {
 
 export type MessageResultCite = {
   Cite: {
-    path_alias: number;
+    path_alias?: number;
     path: string;
     comment: string;
     start_line: number;
@@ -179,10 +185,22 @@ export type MessageResultModify = {
   };
 };
 
-export type ChatLoadingStep = {
-  type: string;
-  content: string;
+export type ChatLoadingStep = SearchStepType & {
+  path: string;
   displayText: string;
+};
+
+export type FileSystemResult = {
+  Filesystem?: (
+    | MessageResultCite
+    | MessageResultNew
+    | MessageResultModify
+    | MessageResultDirectory
+  )[];
+};
+
+export type ArticleResult = {
+  Article?: string;
 };
 
 export type ChatMessageServer = {
@@ -192,24 +210,28 @@ export type ChatMessageServer = {
   loadingSteps: ChatLoadingStep[];
   error?: string;
   isFromHistory?: boolean;
-  type: ChatMessageType;
-  results?: (
-    | MessageResultCite
-    | MessageResultNew
-    | MessageResultModify
-    | MessageResultDirectory
-  )[];
+  results?: string;
+  queryId: string;
+  responseTimestamp: string;
+  explainedFile?: string;
 };
 
 export type ChatMessage = ChatMessageUser | ChatMessageServer;
 
 export interface NavigationItem {
-  type: 'search' | 'repo' | 'full-result' | 'home' | 'conversation-result';
+  type:
+    | 'search'
+    | 'repo'
+    | 'full-result'
+    | 'home'
+    | 'conversation-result'
+    | 'article-response';
   query?: string;
   repo?: string;
   path?: string;
   page?: number;
   loaded?: boolean;
+  isInitial?: boolean;
   searchType?: SearchType;
   pathParams?: Record<string, string>;
   threadId?: string;
@@ -223,8 +245,67 @@ export type EnvConfig = {
   org_name?: string | null;
   tracking_id?: string;
   device_id?: string;
+  user_login?: string;
   github_user?: {
     login: string;
     avatar_url: string;
   };
+  bloop_user_profile?: {
+    prompt_guide?: string;
+  };
 };
+
+export type IpynbOutputType = {
+  name?: string;
+  stream?: string;
+  ename?: string;
+  evalue?: string;
+  traceback?: string[];
+  data?: {
+    'text/plain'?: string[];
+    'text/html'?: string[];
+    'text/latex'?: string[];
+    'image/png'?: string;
+    'image/jpeg'?: string;
+    'image/gif'?: string;
+    'image/svg+xml'?: string;
+    'application/javascript'?: string[];
+  };
+  output_type?: string;
+  png?: string;
+  jpeg?: string;
+  gif?: string;
+  svg?: string;
+  html?: string;
+  latex?: string;
+  text?: string[];
+  execution_count?: number;
+  prompt_number?: number;
+  metadata?: {
+    scrolled?: boolean;
+  };
+};
+
+export type IpynbCellType = {
+  attachments?: {
+    [s: string]: {
+      [s: string]: string;
+    };
+  };
+  cell_type?: string;
+  language?: string;
+  execution_count?: number | null;
+  prompt_number?: number;
+  auto_number?: number;
+  level?: number;
+  source?: string[];
+  outputs?: IpynbOutputType[];
+  input?: string[];
+};
+
+export type FileHighlightsType = Record<
+  string,
+  ({ lines: [number, number]; color: string; index: number } | undefined)[]
+>;
+
+export type LocaleType = 'en' | 'ja' | 'zhCN';

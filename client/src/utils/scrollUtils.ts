@@ -1,4 +1,5 @@
 import { Align } from 'react-window';
+import { findElementInCurrentTab } from './domUtils';
 
 type ReactWindowProps = {
   height: number;

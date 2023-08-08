@@ -1,4 +1,5 @@
 import React, { useCallback, useContext, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { UIContext } from '../../context/uiContext';
 import { DeviceContext } from '../../context/deviceContext';
 import NavBar from '../../components/NavBar';
@@ -34,6 +35,7 @@ export type Form = {
 };
 
 const Onboarding = () => {
+  const { t } = useTranslation();
   const [form, setForm] = useState<Form>({
     firstName: '',
     lastName: '',
@@ -43,8 +45,10 @@ const Onboarding = () => {
   });
   const [isGitHubScreen, setGitHubScreen] = useState(false);
   const [shouldShowPopup, setShouldShowPopup] = useState(false);
-  const { shouldShowWelcome, setShouldShowWelcome, isGithubConnected } =
-    useContext(UIContext);
+  const { shouldShowWelcome, setShouldShowWelcome } = useContext(
+    UIContext.Onboarding,
+  );
+  const { isGithubConnected } = useContext(UIContext.GitHubConnected);
   const { isSelfServe, os, setEnvConfig, envConfig } =
     useContext(DeviceContext);
 
@@ -133,8 +137,8 @@ const Onboarding = () => {
         <div
           className={`flex justify-center items-start mt-8 w-screen overflow-auto relative h-[calc(100vh-4rem)]`}
         >
-          <div className="fixed top-0 bottom-0 left-0 right-0 mt-8 mb-16 bg-[url('/onboarding-background.png')] bg-cover z-50">
-            <div className="absolute top-0 bottom-0 left-0 right-0 flex justify-center items-center overflow-auto bg-bg-base/75">
+          <div className="fixed top-0 bottom-0 left-0 right-0 mt-8 mb-16 bg-bg-base z-80">
+            <div className="absolute top-0 bottom-0 left-0 right-0 flex justify-center items-center overflow-auto">
               <div className="flex flex-col items-center max-w-md2 w-full">
                 <div className="bg-bg-base border border-bg-border rounded-lg shadow-high p-6 flex flex-col flex-1 gap-8 w-full max-w-md2 relative max-h-[calc(100vh-12rem)]">
                   <SelfServeStep />
@@ -178,7 +182,7 @@ const Onboarding = () => {
         before:bg-repeat before:mix-blend-soft-light before:opacity-[0.14]`}
           >
             <div className="w-[585px]">
-              <img className="onboarding-chats-img" alt="chats in bloop" />
+              <img className="onboarding-chats-img" alt={t('chats in bloop')} />
             </div>
           </div>
         </div>

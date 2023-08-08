@@ -9,7 +9,7 @@ import {
   SuggestionsResponse,
   TokenInfoResponse,
 } from '../types/api';
-import { RepoType } from '../types/general';
+import { EnvConfig, RepoType } from '../types/general';
 
 const DB_API = 'https://api.bloop.ai';
 let http: AxiosInstance;
@@ -75,10 +75,11 @@ export const nlSearch = (
 export const getHoverables = async (
   path: string,
   repoId: string,
+  branch?: string,
 ): Promise<HoverablesResponse> => {
   try {
     const { data } = await http.get('/hoverable', {
-      params: { relative_path: path, repo_ref: repoId },
+      params: { relative_path: path, repo_ref: repoId, branch },
     });
     return data;
   } catch (e) {
@@ -91,6 +92,7 @@ export const getTokenInfo = async (
   repoRef: string,
   start: number,
   end: number,
+  branch?: string,
 ): Promise<TokenInfoResponse> => {
   return http
     .get('/token-info', {
@@ -99,9 +101,18 @@ export const getTokenInfo = async (
         repo_ref: repoRef,
         start,
         end,
+        branch,
       },
     })
     .then((r) => r.data);
+};
+
+export const indexRepoBranch = async (repoRef: string, branch: string) => {
+  return http.patch(
+    '/repos/indexed',
+    { branch_filter: { select: [branch] } },
+    { params: { repo: repoRef } },
+  );
 };
 
 export const getAutocomplete = async (
@@ -129,18 +140,26 @@ export const scanLocalRepos = (path: string) => {
   }
   return http.get(`/repos/scan`, { params: { path } }).then((r) => {
     localScanCache[path] = r.data;
-    setTimeout(() => {
-      delete localScanCache[path];
-    }, 1000 * 60 * 10); // 10 minutes
+    setTimeout(
+      () => {
+        delete localScanCache[path];
+      },
+      1000 * 60 * 10,
+    ); // 10 minutes
     return r.data;
   });
 };
 
 export const deleteRepo = (repoRef: string) =>
-  http.delete(`/repos/indexed/${repoRef}`).then((r) => r.data);
+  http
+    .delete(`/repos/indexed`, { params: { repo: repoRef } })
+    .then((r) => r.data);
+
+export const cancelSync = (repoRef: string) =>
+  http.delete(`/repos/sync`, { params: { repo: repoRef } }).then((r) => r.data);
 
 export const syncRepo = (repoRef: string) =>
-  http.get(`/repos/sync/${repoRef}`).then((r) => r.data);
+  http.get(`/repos/sync`, { params: { repo: repoRef } }).then((r) => r.data);
 
 export const saveUserData = (userData: {
   email: string;
@@ -154,6 +173,8 @@ export const saveBugReport = (report: {
   name: string;
   text: string;
   unique_id: string;
+  app_version: string;
+  metadata: string;
 }) => axios.post(`${DB_API}/bug_reports`, report).then((r) => r.data);
 
 export const saveCrashReport = (report: {
@@ -161,6 +182,7 @@ export const saveCrashReport = (report: {
   unique_id: string;
   info: string;
   metadata: string;
+  app_version: string;
 }) => axios.post(`${DB_API}/crash_reports`, report).then((r) => r.data);
 
 export const saveUpvote = (upvote: {
@@ -180,10 +202,14 @@ export const getUpvote = (params: {
 export const getDiscordLink = () =>
   axios.get(`${DB_API}/discord-url`).then((r) => r.data);
 
-export const githubWebLogin = () =>
-  http.get('/auth/login/start').then((r) => r.data);
+export const githubWebLogin = (redirect_to: string) =>
+  http
+    .get('/auth/login/start', { params: { redirect_to } })
+    .then((r) => r.data);
 
 export const getConfig = () => http.get('/config').then((r) => r.data);
+export const putConfig = (data: Partial<EnvConfig>) =>
+  http.put('/config', data).then((r) => r.data);
 
 export const getAllConversations = (
   repo_ref: string,
@@ -203,3 +229,20 @@ export const deleteConversation = (
   http
     .delete(`/answer/conversations`, { params: { thread_id } })
     .then((r) => r.data);
+
+export const upvoteAnswer = (
+  thread_id: string,
+  query_id: string,
+  repo_ref: string,
+  feedback: { type: 'positive' } | { type: 'negative'; feedback: string },
+): Promise<ConversationType> =>
+  http
+    .post(`/answer/vote`, {
+      thread_id,
+      query_id,
+      repo_ref,
+      feedback,
+    })
+    .then((r) => r.data);
+
+export const getIndexQueue = () => http('/repos/queue').then((r) => r.data);

@@ -2,27 +2,15 @@ import React, {
   ChangeEvent,
   useCallback,
   useContext,
-  useMemo,
   useRef,
   useState,
 } from 'react';
 import { useCombobox } from 'downshift';
 import throttle from 'lodash.throttle';
-import { format, isToday, isYesterday } from 'date-fns';
-import {
-  ArrowRevert,
-  Clipboard,
-  NaturalLanguage,
-  RegexIcon,
-  TrashCan,
-} from '../../icons';
-import { DropdownWithIcon } from '../Dropdown';
+import { useTranslation } from 'react-i18next';
 import { useArrowKeyNavigation } from '../../hooks/useArrowNavigationHook';
 import { SearchContext } from '../../context/searchContext';
-import Button from '../Button';
-import { copyToClipboard, parseFilters } from '../../utils';
-import { ContextMenuItem, MenuListItemType } from '../ContextMenu';
-import { saveJsonToStorage, SEARCH_HISTORY_KEY } from '../../services/storage';
+import { parseFilters } from '../../utils';
 import { getAutocomplete } from '../../services/api';
 import {
   LangResult,
@@ -31,17 +19,10 @@ import {
 } from '../../types/results';
 import { mapResults } from '../../mappers/results';
 import useAppNavigation from '../../hooks/useAppNavigation';
-import {
-  ExtendedMenuItemType,
-  SearchHistoryItem,
-  SearchType,
-} from '../../types/general';
 import useKeyboardNavigation from '../../hooks/useKeyboardNavigation';
 import { UIContext } from '../../context/uiContext';
 import AutocompleteMenu from './AutocompleteMenu';
 import SearchTextInput from './SearchTextInput';
-
-const INPUT_POSITION_LEFT = 47;
 
 const getAutocompleteThrottled = throttle(
   async (
@@ -56,19 +37,15 @@ const getAutocompleteThrottled = throttle(
 );
 
 function SearchInput() {
-  const {
-    inputValue,
-    setInputValue,
-    searchHistory,
-    setFilters,
-    filters,
-    setSearchHistory,
-    globalRegex,
-    setGlobalRegex,
-  } = useContext(SearchContext);
-  const { tab } = useContext(UIContext);
+  const { t } = useTranslation();
+  const { inputValue, setInputValue } = useContext(SearchContext.InputValue);
+  const { tab } = useContext(UIContext.Tab);
+  const { selectedBranch } = useContext(SearchContext.SelectedBranch);
+  const { setFilters, filters } = useContext(SearchContext.Filters);
+  const { globalRegex, setGlobalRegex } = useContext(
+    SearchContext.RegexEnabled,
+  );
   const [options, setOptions] = useState<SuggestionType[]>([]);
-  const [left, setLeft] = useState<number>(INPUT_POSITION_LEFT);
   const inputRef = useRef<HTMLInputElement>(null);
   const { navigateSearch, navigateRepoPath } = useAppNavigation();
   const arrowNavContainerRef = useArrowKeyNavigation({
@@ -157,12 +134,14 @@ function SearchInput() {
             setFilters([]);
             return;
           }
-          getAutocompleteThrottled(
-            state.inputValue.includes(`repo:${tab.name}`)
-              ? state.inputValue
-              : `${state.inputValue} repo:${tab.name}`,
-            setOptions,
-          );
+          let autocompleteQuery = state.inputValue;
+          if (selectedBranch) {
+            autocompleteQuery += ` branch:${selectedBranch}`;
+          }
+          if (!state.inputValue.includes(`repo:${tab.name}`)) {
+            autocompleteQuery += ` repo:${tab.name}`;
+          }
+          getAutocompleteThrottled(autocompleteQuery, setOptions);
           const parsedFilters = parseFilters(state.inputValue);
           if (Object.entries(parsedFilters).some((filters) => filters.length)) {
             const newFilters = filters.map((filterItem) => ({
@@ -201,103 +180,25 @@ function SearchInput() {
       if (!val.trim()) {
         return;
       }
+      if (!val.includes(' branch:') && selectedBranch) {
+        val += ` branch:${selectedBranch}`;
+      }
       navigateSearch(val);
       closeMenu();
-      setSearchHistory((prev) => {
-        const newHistory = [
-          {
-            query: val,
-            searchType: SearchType.REGEX,
-            timestamp: new Date().toISOString(),
-          },
-          ...prev,
-        ].slice(0, 29);
-        saveJsonToStorage(SEARCH_HISTORY_KEY, newHistory);
-        return newHistory;
-      });
     },
-    [tab.name],
+    [tab.name, selectedBranch],
   );
-
-  const handleClearHistory = useCallback(() => {
-    setSearchHistory([]);
-    saveJsonToStorage(SEARCH_HISTORY_KEY, []);
-  }, []);
-
-  const historyItems = useMemo(() => {
-    const historyByDay: Record<string, SearchHistoryItem[]> = {};
-    searchHistory.forEach((search) => {
-      const day =
-        typeof search === 'string' || !search.timestamp
-          ? 'Previous'
-          : isToday(new Date(search.timestamp))
-          ? 'Today'
-          : isYesterday(new Date(search.timestamp))
-          ? 'Yesterday'
-          : format(new Date(search.timestamp), 'EEEE, MMM d');
-      if (historyByDay[day]) {
-        historyByDay[day].push(search);
-      } else {
-        historyByDay[day] = [search];
-      }
-    });
-    const items: ContextMenuItem[] = [];
-    Object.entries(historyByDay).forEach(([day, searches]) => {
-      items.push({ type: ExtendedMenuItemType.DIVIDER_WITH_TEXT, text: day });
-      searches.forEach((s) => {
-        const isOlderItem = typeof s === 'string';
-        items.push({
-          text: isOlderItem ? (
-            s
-          ) : (
-            <div className="flex justify-between items-center w-full">
-              <span>{s.query}</span>
-              <span>
-                {s.timestamp ? format(new Date(s.timestamp), 'HH:mm') : ''}
-              </span>
-            </div>
-          ),
-          type: MenuListItemType.DEFAULT,
-          icon: isOlderItem ? undefined : s.searchType === SearchType.NL ? (
-            <NaturalLanguage />
-          ) : (
-            <RegexIcon />
-          ),
-          onClick: () => {
-            setInputValue(isOlderItem ? s : s.query);
-            onSubmit(isOlderItem ? s : s.query);
-          },
-        });
-      });
-    });
-    return [
-      ...items,
-      {
-        text: 'Clear search history',
-        type: MenuListItemType.DANGER,
-        icon: <TrashCan />,
-        onClick: handleClearHistory,
-      },
-    ];
-  }, [searchHistory, onSubmit, handleClearHistory]);
 
   return (
     <div
       className="relative flex gap-2 flex-1 justify-center"
       ref={arrowNavContainerRef}
     >
-      <Button
-        variant="tertiary"
-        onlyIcon
-        title="Copy search query to clipboard"
-        onClick={() => copyToClipboard(inputValue)}
-      >
-        <Clipboard />
-      </Button>
       <div className="flex-1 max-w-3xl">
         <SearchTextInput
           type="search"
-          placeholder="Search for code using regex"
+          name="regex_search"
+          placeholder={t('Regex search...')}
           regex
           {...getInputProps(
             {
@@ -319,16 +220,8 @@ function SearchInput() {
       <AutocompleteMenu
         getMenuProps={getMenuProps}
         getItemProps={getItemProps}
-        left={left}
         isOpen={isOpen && !!options.length}
         options={options}
-      />
-
-      <DropdownWithIcon
-        items={historyItems}
-        icon={<ArrowRevert />}
-        lastItemFixed
-        size="large"
       />
     </div>
   );

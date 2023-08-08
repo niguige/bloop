@@ -8,13 +8,14 @@ import {
   useLocation,
   useNavigationType,
 } from 'react-router-dom';
+import { EnvConfig } from '../types/general';
 
-export const initializeSentry = (dsn: string, release: string) => {
-  if (!dsn) {
+export const initializeSentry = (envConfig: EnvConfig, release: string) => {
+  if (!envConfig.sentry_dsn_fe) {
     return;
   }
   Sentry.init({
-    dsn,
+    dsn: envConfig.sentry_dsn_fe,
     integrations: [
       new BrowserTracing({
         routingInstrumentation: Sentry.reactRouterV6Instrumentation(
@@ -30,5 +31,11 @@ export const initializeSentry = (dsn: string, release: string) => {
     environment: import.meta.env.MODE,
     release,
     tracesSampleRate: import.meta.env.MODE === 'development' ? 1.0 : 0.1,
+  });
+
+  Sentry.setUser({
+    id: envConfig.tracking_id,
+    username: envConfig.user_login,
+    device_id: envConfig.device_id,
   });
 };

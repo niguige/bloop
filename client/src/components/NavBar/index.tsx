@@ -1,4 +1,5 @@
 import React, { useContext } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Bug, Cog, DoorRight, Magazine, Person } from '../../icons';
 import { MenuListItemType } from '../ContextMenu';
 import { deleteAuthCookie } from '../../utils';
@@ -15,19 +16,18 @@ type Props = {
 };
 
 const NavBar = ({ isSkeleton }: Props) => {
-  const {
-    setBugReportModalOpen,
-    setShouldShowWelcome,
-    setGithubConnected,
-    setSettingsOpen,
-  } = useContext(UIContext);
+  const { t } = useTranslation();
+  const { setSettingsOpen } = useContext(UIContext.Settings);
+  const { setBugReportModalOpen } = useContext(UIContext.BugReport);
+  const { setShouldShowWelcome } = useContext(UIContext.Onboarding);
+  const { setGithubConnected } = useContext(UIContext.GitHubConnected);
   const { openLink, isSelfServe, os, envConfig } = useContext(DeviceContext);
   const { tabs, setActiveTab, activeTab, handleRemoveTab } =
     useContext(TabsContext);
 
   return (
     <div
-      className={`h-8 flex items-center px-8 bg-bg-base fixed top-0 left-0 right-0 z-50
+      className={`h-8 flex items-center px-8 bg-bg-base fixed top-0 left-0 right-0 z-80
        border-b border-bg-border backdrop-blur-8 select-none`}
       data-tauri-drag-region
     >
@@ -54,25 +54,25 @@ const NavBar = ({ isSkeleton }: Props) => {
           <DropdownWithIcon
             items={[
               {
-                text: 'Settings',
+                text: t('Settings'),
                 icon: <Cog />,
                 type: MenuListItemType.DEFAULT,
                 onClick: () => setSettingsOpen(true),
               },
               {
-                text: 'Documentation',
+                text: t('Documentation'),
                 icon: <Magazine />,
                 type: MenuListItemType.DEFAULT,
                 onClick: () => openLink('https://bloop.ai/docs'),
               },
               {
-                text: 'Report a bug',
+                text: t('Report a bug'),
                 icon: <Bug />,
                 type: MenuListItemType.DEFAULT,
                 onClick: () => setBugReportModalOpen(true),
               },
               {
-                text: 'Sign out',
+                text: t('Sign out'),
                 icon: <DoorRight />,
                 type: MenuListItemType.DEFAULT,
                 onClick: () => {

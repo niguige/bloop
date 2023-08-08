@@ -1193,6 +1193,15 @@ h5, .h5 {
   font-size: 0.75rem;
   line-height: 150%;
 }
+
+.code-m {
+  font-family: Menlo, sans-serif;
+  font-style: normal;
+  font-weight: 400;
+  font-size: 1rem;
+  line-height: 160%;
+}
+
 .hide-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -1266,11 +1275,42 @@ h5, .h5 {
 }
 
 .readme h1, .readme h2, .readme h3, .readme h4, .readme h5, .readme h6, .readme p, .readme span, .readme div {
+  cursor: auto;
+}
+
+.readme h1, .readme h2, .readme h3, .readme h4, .readme h5, .readme h6, .readme p, .readme span, .readme div,
+.article-response h1, .article-response h2, .article-response h3, .article-response h4, .article-response h5,
+.article-response h6, .article-response p {
+  margin: revert;
+}
+
+.readme h1, .readme h2, .readme h3, .readme h4, .readme h5, .readme h6, .readme p,
+.article-response h1, .article-response h2, .article-response h3, .article-response h4, .article-response h5,
+.article-response h6, .article-response p,
+.ipynb-markdown h1, .ipynb-markdown h2, .ipynb-markdown h3, .ipynb-markdown h4, .ipynb-markdown h5,
+.ipynb-markdown h6, .ipynb-markdown p {
   -webkit-user-select: initial;
   -moz-user-select: initial;
   user-select: initial;
-  cursor: auto;
-  margin: revert;
+}
+
+.ipynb-markdown p:not(:first-child), h1:not(:first-child), h2:not(:first-child), h3:not(:first-child), h4:not(:first-child) {
+  margin-top: revert;
+}
+
+.ipynb-markdown p:not(:last-child), h1:not(:last-child), h2:not(:last-child), h3:not(:last-child), h4:not(:last-child) {
+  margin-bottom: revert;
+}
+
+.ipynb-markdown blockquote {
+  @apply border-l-2 border-bg-border;
+  margin: 1em 2em;
+  padding: 0 1em;
+}
+
+.article-response h1, .article-response h2, .article-response h3, .article-response h4, .article-response h5,
+.article-response h6 {
+  @apply text-label-title;
 }
 
 .readme h1, .readme h2 {
@@ -1278,44 +1318,76 @@ h5, .h5 {
   padding-bottom: 0.6rem;
 }
 
-.readme h1 {
+.readme h1, .article-response h1, .markdown h1 {
   font-size: 2rem;
 }
 
-.readme h2 {
+.readme h2, .article-response h2, .markdown h2 {
   font-size: 1.5rem;
 }
 
-.readme h3 {
+.readme h3, .article-response h3, .markdown h3 {
   font-size: 1.25rem
 }
 
-.readme h4 {
+.readme h4, .article-response h4, .markdown h4 {
   font-size: 1rem
 }
 
-.readme h5 {
+.readme h5, .article-response h5, .markdown h5 {
   font-size: .875rem
 }
 
-.readme h6 {
+.readme h6, .article-response h6, .markdown h6 {
   font-size: .85rem
 }
 
-.readme ul {
+.readme ul, .article-response ul, .markdown ul {
   list-style: revert;
   margin: revert;
   padding: revert;
 }
 
-.readme ol {
+.readme ol, .article-response ol, .markdown ol {
   list-style: revert;
   margin: revert;
   padding: revert;
 }
 
-.readme a {
+.readme a, .markdown a {
   color: rgb(var(--label-link));
+}
+
+.article-response a, .summary-card a {
+  background-color: rgb(var(--bg-shade));
+  border: 1px solid rgb(var(--bg-border));
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+.article-response li>p {
+  margin: 0;
+  display: unset;
+}
+
+.article-response code, .summary-card code {
+  color: #14B8A6;
+  font-family: Menlo, sans-serif;
+  font-size: 0.95em;
+}
+
+.markdown code {
+  background-color: rgb(var(--bg-shade));
+  border: 1px solid rgb(var(--bg-border));
+  padding: 1px 3px;
+  border-radius: 4px;
+}
+
+.article-response pre:has(code) {
+  background-color: rgb(var(--bg-shade));
+  border: 1px solid rgb(var(--bg-border));
+  border-radius: 8px;
+  padding: 12px;
 }
 
 .hljs-addition {
@@ -1343,4 +1415,8 @@ h5, .h5 {
 
 .chat-head-bg {
   background: radial-gradient(47.73% 47.73% at 50% 0%,transparent 0%, rgb(var(--chat-bg-sub)) 100%);
+}
+
+.break-word {
+  word-break: break-word;
 }

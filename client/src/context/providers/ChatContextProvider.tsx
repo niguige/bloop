@@ -16,23 +16,18 @@ export const ChatContextProvider = ({ children }: PropsWithChildren<Props>) => {
     null,
   );
   const [threadId, setThreadId] = useState('');
+  const [queryId, setQueryId] = useState('');
 
-  const contextValue = useMemo(
+  const valuesContextValue = useMemo(
     () => ({
       conversation,
-      setConversation,
       isChatOpen,
-      setChatOpen,
       showTooltip,
-      setShowTooltip,
       tooltipText,
-      setTooltipText,
       submittedQuery,
-      setSubmittedQuery,
       selectedLines,
-      setSelectedLines,
       threadId,
-      setThreadId,
+      queryId,
     }),
     [
       conversation,
@@ -42,9 +37,29 @@ export const ChatContextProvider = ({ children }: PropsWithChildren<Props>) => {
       submittedQuery,
       selectedLines,
       threadId,
+      queryId,
     ],
   );
+
+  const settersContextValue = useMemo(
+    () => ({
+      setConversation,
+      setChatOpen,
+      setShowTooltip,
+      setTooltipText,
+      setSubmittedQuery,
+      setSelectedLines,
+      setThreadId,
+      setQueryId,
+    }),
+    [],
+  );
+
   return (
-    <ChatContext.Provider value={contextValue}>{children}</ChatContext.Provider>
+    <ChatContext.Setters.Provider value={settersContextValue}>
+      <ChatContext.Values.Provider value={valuesContextValue}>
+        {children}
+      </ChatContext.Values.Provider>
+    </ChatContext.Setters.Provider>
   );
 };

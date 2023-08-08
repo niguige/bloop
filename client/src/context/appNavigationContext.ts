@@ -12,8 +12,8 @@ type ContextType = {
     path?: string,
     page?: number,
   ) => void;
-  navigateBack: (delta?: number) => void;
-  navigateForward: () => void;
+  navigateBack: (delta?: number | 'auto') => void;
+  navigateForward: (delta?: number | 'auto') => void;
   navigateHome: () => void;
   navigateRepoPath: (
     repo: string,
@@ -22,11 +22,14 @@ type ContextType = {
   ) => void;
   navigateSearch: (query: string, page?: number) => void;
   navigateFullResult: (
-    repo: string,
     path: string,
     pathParams?: Record<string, string>,
+    messageIndex?: number,
+    searchId?: string,
   ) => void;
   navigateConversationResults: (messageIndex: number, searchId: string) => void;
+  navigateArticleResponse: (messageIndex: number, searchId: string) => void;
+  updateScrollToIndex: (lines: string) => void;
   query: string;
 };
 
@@ -39,7 +42,9 @@ export const AppNavigationContext = createContext<ContextType>({
   navigateHome: () => {},
   navigateRepoPath: (repo, path) => {},
   navigateSearch: (query, page) => {},
-  navigateFullResult: (repo, path) => {},
+  navigateFullResult: () => {},
   navigateConversationResults: (recordId, searchId) => {},
+  navigateArticleResponse: (recordId, searchId) => {},
+  updateScrollToIndex: (lines) => {},
   query: '',
 });

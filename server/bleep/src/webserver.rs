@@ -1,6 +1,11 @@
 use crate::{env::Feature, Application};
 
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Extension, Json};
+use axum::{
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Extension, Json,
+};
 use std::{borrow::Cow, net::SocketAddr};
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
@@ -18,27 +23,25 @@ mod index;
 mod intelligence;
 pub mod middleware;
 mod query;
-mod repos;
+pub mod repos;
 mod semantic;
 
 pub type Router<S = Application> = axum::Router<S>;
 
 #[allow(unused)]
-pub(in crate::webserver) mod prelude {
-    pub(in crate::webserver) use super::{json, EndpointError, Error, ErrorKind, Result, Router};
-    pub(in crate::webserver) use crate::indexes::Indexes;
-    pub(in crate::webserver) use axum::{
-        extract::Query, http::StatusCode, response::IntoResponse, Extension,
-    };
-    pub(in crate::webserver) use serde::{Deserialize, Serialize};
-    pub(in crate::webserver) use std::sync::Arc;
+pub(crate) mod prelude {
+    pub(crate) use super::{json, EndpointError, Error, ErrorKind, Result, Router};
+    pub(crate) use crate::indexes::Indexes;
+    pub(crate) use axum::{extract::Query, http::StatusCode, response::IntoResponse, Extension};
+    pub(crate) use serde::{Deserialize, Serialize};
+    pub(crate) use std::sync::Arc;
 }
 
 pub async fn start(app: Application) -> anyhow::Result<()> {
     let bind = SocketAddr::new(app.config.host.parse()?, app.config.port);
 
     let mut api = Router::new()
-        .route("/config", get(config::handle))
+        .route("/config", get(config::get).put(config::put))
         // querying
         .route("/q", get(query::handle))
         // autocomplete
@@ -46,24 +49,15 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
         // indexing
         .route("/index", get(index::handle))
         // repo management
-        .route("/repos", get(repos::available))
-        .route("/repos/status", get(repos::index_status))
-        .route(
-            "/repos/indexed",
-            get(repos::indexed).put(repos::set_indexed),
-        )
-        .route(
-            "/repos/indexed/*path",
-            get(repos::get_by_id).delete(repos::delete_by_id),
-        )
-        .route("/repos/sync/*path", get(repos::sync))
+        .nest("/repos", repos::router())
         // intelligence
         .route("/hoverable", get(hoverable::handle))
         .route("/token-info", get(intelligence::handle))
         // misc
         .route("/search", get(semantic::complex_search))
         .route("/file", get(file::handle))
-        .route("/answer", get(answer::handle))
+        .route("/answer", get(answer::answer))
+        .route("/answer/explain", get(answer::explain))
         .route(
             "/answer/conversations",
             get(answer::conversations::list).delete(answer::conversations::delete),
@@ -71,7 +65,8 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
         .route(
             "/answer/conversations/:thread_id",
             get(answer::conversations::thread),
-        );
+        )
+        .route("/answer/vote", post(answer::vote));
 
     if app.env.allow(Feature::AnyPathScan) {
         api = api.route("/repos/scan", get(repos::scan_local));
@@ -84,12 +79,14 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
             .route("/remotes/github/status", get(github::status));
     }
 
+    api = api.route("/panic", get(|| async { panic!("dead") }));
+
     // Note: all routes above this point must be authenticated.
     // These middlewares MUST provide the `middleware::User` extension.
     if app.env.allow(Feature::AuthorizationRequired) {
-        api = aaa::router(api, app.clone());
+        api = aaa::router(middleware::sentry_layer(api), app.clone());
     } else {
-        api = middleware::local_user(api, app.clone());
+        api = middleware::local_user(middleware::sentry_layer(api), app.clone());
     }
 
     api = api.route("/health", get(health));
@@ -128,16 +125,16 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn json<'a, T>(val: T) -> Json<Response<'a>>
+pub(crate) fn json<'a, T>(val: T) -> Json<Response<'a>>
 where
     Response<'a>: From<T>,
 {
     Json(Response::from(val))
 }
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-struct Error {
+pub struct Error {
     status: StatusCode,
     body: Json<Response<'static>>,
 }
@@ -209,7 +206,7 @@ impl IntoResponse for Error {
 
 /// The response upon encountering an error
 #[derive(serde::Serialize, PartialEq, Eq, Debug)]
-struct EndpointError<'a> {
+pub struct EndpointError<'a> {
     /// The kind of this error
     kind: ErrorKind,
 
@@ -222,7 +219,7 @@ struct EndpointError<'a> {
 #[derive(serde::Serialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-enum ErrorKind {
+pub enum ErrorKind {
     User,
     Unknown,
     NotFound,
@@ -242,7 +239,7 @@ erased_serde::serialize_trait_object!(ApiResponse);
 #[derive(serde::Serialize)]
 #[serde(untagged)]
 #[non_exhaustive]
-enum Response<'a> {
+pub(crate) enum Response<'a> {
     Ok(Box<dyn erased_serde::Serialize + Send + Sync + 'static>),
     Error(EndpointError<'a>),
 }

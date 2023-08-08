@@ -9,17 +9,16 @@ import {
 } from '../types/api';
 import PageTemplate from '../components/PageTemplate';
 import ErrorFallback from '../components/ErrorFallback';
-import useAppNavigation from '../hooks/useAppNavigation';
 import { buildRepoQuery } from '../utils';
 import useKeyboardNavigation from '../hooks/useKeyboardNavigation';
 import { UITabType } from '../types/general';
+import { AppNavigationContext } from '../context/appNavigationContext';
 import RepositoryPage from './Repository';
 import ResultsPage from './Results';
 import ViewResult from './ResultFull';
 import NoResults from './Results/NoResults';
 import HomePage from './Home';
-import Onboarding from './Onboarding';
-import ConversationResult from './ConversationResult';
+import ArticleResponse from './ArticleResponse';
 
 const mockQuerySuggestions = [
   'repo:cobra-ats  error:“no apples”',
@@ -29,23 +28,24 @@ const mockQuerySuggestions = [
   'lang:tsx apples',
 ];
 
-type RenderPage =
+export type RenderPage =
   | 'results'
   | 'repo'
   | 'full-result'
-  | 'nl-result'
   | 'no-results'
   | 'home'
-  | 'conversation-result';
+  | 'article-response';
 
 let prevRenderPage: RenderPage;
 
 const ContentContainer = ({ tab }: { tab: UITabType }) => {
-  const { setInputValue, globalRegex } = useContext(SearchContext);
+  const { setInputValue } = useContext(SearchContext.InputValue);
+  const { globalRegex } = useContext(SearchContext.RegexEnabled);
+  const { selectedBranch } = useContext(SearchContext.SelectedBranch);
   const { searchQuery, data, loading } = useSearch<SearchResponse>();
 
   const { navigatedItem, query, navigateBack, navigateRepoPath } =
-    useAppNavigation();
+    useContext(AppNavigationContext);
 
   const handleKeyEvent = useCallback((e: KeyboardEvent) => {
     if (
@@ -74,7 +74,9 @@ const ContentContainer = ({ tab }: { tab: UITabType }) => {
 
     setInputValue(
       query
-        .replace(/repo:.*\s/, '')
+        .replace(/repo:.*?\s/, '')
+        .replace(/branch:.*?\s/, '')
+        .replace(/branch:.*$/, '')
         .replace('open:true', '')
         .trim(),
     );
@@ -82,10 +84,17 @@ const ContentContainer = ({ tab }: { tab: UITabType }) => {
     switch (navigatedItem.type) {
       case 'repo':
       case 'full-result':
-        searchQuery(buildRepoQuery(navigatedItem.repo, navigatedItem.path));
+        searchQuery(
+          buildRepoQuery(
+            navigatedItem.repo,
+            navigatedItem.path,
+            selectedBranch,
+          ),
+        );
         break;
       case 'home':
       case 'conversation-result':
+      case 'article-response':
         break;
       default:
         const search = navigatedItem.query!.includes(`repo:${tab.name}`)
@@ -93,18 +102,18 @@ const ContentContainer = ({ tab }: { tab: UITabType }) => {
           : `${navigatedItem.query} repo:${tab.name}`;
         searchQuery(search, navigatedItem.page, globalRegex);
     }
-  }, [navigatedItem, tab.key, tab.name]);
+  }, [navigatedItem, tab.key, tab.name, selectedBranch]);
 
-  const getRenderPage = useCallback(() => {
+  const getRenderPage = useCallback((): RenderPage => {
     let renderPage: RenderPage;
     if (tab.key === 'initial') {
       return 'home';
     }
-    if (navigatedItem?.type === 'conversation-result') {
-      return 'conversation-result';
-    }
-    if (navigatedItem?.type === 'full-result') {
-      return 'full-result';
+    if (
+      navigatedItem?.type &&
+      ['full-result', 'article-response'].includes(navigatedItem.type)
+    ) {
+      return navigatedItem.type as 'full-result' | 'article-response';
     }
     if (!data?.data?.[0] && !loading) {
       return 'no-results';
@@ -127,7 +136,7 @@ const ContentContainer = ({ tab }: { tab: UITabType }) => {
     return renderPage;
   }, [navigatedItem, data, loading, tab.key]);
 
-  const renderPage = useMemo(
+  const renderPage: RenderPage = useMemo(
     () => getRenderPage(),
     [data, loading, navigatedItem, query, navigatedItem?.threadId],
   );
@@ -162,10 +171,19 @@ const ContentContainer = ({ tab }: { tab: UITabType }) => {
           <RepositoryPage repositoryData={data as DirectorySearchResponse} />
         );
       case 'full-result':
-        return <ViewResult data={data} isLoading={loading} />;
-      case 'conversation-result':
         return (
-          <ConversationResult
+          <ViewResult
+            data={data}
+            isLoading={loading}
+            repoName={tab.repoName}
+            selectedBranch={selectedBranch}
+            recordId={navigatedItem?.recordId!}
+            threadId={navigatedItem?.threadId!}
+          />
+        );
+      case 'article-response':
+        return (
+          <ArticleResponse
             recordId={navigatedItem?.recordId!}
             threadId={navigatedItem?.threadId!}
           />
@@ -180,19 +198,11 @@ const ContentContainer = ({ tab }: { tab: UITabType }) => {
     query,
     navigatedItem?.threadId,
     renderPage,
+    tab.repoName,
+    selectedBranch,
   ]);
 
-  return (
-    <>
-      <Onboarding />
-      <PageTemplate
-        withSearchBar={renderPage !== 'home'}
-        renderPage={renderPage}
-      >
-        {renderedPage}
-      </PageTemplate>
-    </>
-  );
+  return <PageTemplate renderPage={renderPage}>{renderedPage}</PageTemplate>;
 };
 
 export default Sentry.withErrorBoundary(ContentContainer, {

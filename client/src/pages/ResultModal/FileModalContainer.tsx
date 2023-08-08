@@ -1,56 +1,55 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useCallback, useContext, useEffect, useState } from 'react';
 import { FullResult } from '../../types/results';
 import { useSearch } from '../../hooks/useSearch';
 import { FileSearchResponse } from '../../types/api';
 import { FullResultModeEnum } from '../../types/general';
 import { mapFileResult, mapRanges } from '../../mappers/results';
 import { getHoverables } from '../../services/api';
+import { buildRepoQuery } from '../../utils';
+import { SearchContext } from '../../context/searchContext';
+import { FileModalContext } from '../../context/fileModalContext';
+import { AppNavigationContext } from '../../context/appNavigationContext';
+import { UIContext } from '../../context/uiContext';
 import ResultModal from './index';
 
 type Props = {
   repoName: string;
-  path: string;
-  isOpen: boolean;
-  onClose: () => void;
-  scrollToLine?: string;
 };
 
-const FileModalContainer = ({
-  repoName,
-  path,
-  isOpen,
-  onClose,
-  scrollToLine,
-}: Props) => {
+const FileModalContainer = ({ repoName }: Props) => {
+  const { path, closeFileModalOpen, isFileModalOpen } =
+    useContext(FileModalContext);
+  const { navigatedItem } = useContext(AppNavigationContext);
   const [mode, setMode] = useState<FullResultModeEnum>(
     FullResultModeEnum.MODAL,
   );
   const [openResult, setOpenResult] = useState<FullResult | null>(null);
   const { searchQuery: fileModalSearchQuery, data: fileResultData } =
     useSearch<FileSearchResponse>();
-  const navigateBrowser = useNavigate();
+  const { selectedBranch } = useContext(SearchContext.SelectedBranch);
+  const { setFiltersOpen } = useContext(UIContext.Filters);
 
   useEffect(() => {
-    if (isOpen) {
-      fileModalSearchQuery(`open:true repo:${repoName} path:${path}`);
+    if (isFileModalOpen) {
+      fileModalSearchQuery(buildRepoQuery(repoName, path, selectedBranch));
     }
-  }, [repoName, path, isOpen]);
+  }, [repoName, path, isFileModalOpen, selectedBranch]);
 
   useEffect(() => {
-    if (fileResultData?.data?.length) {
+    setMode(
+      navigatedItem?.type === 'search'
+        ? FullResultModeEnum.SIDEBAR
+        : FullResultModeEnum.MODAL,
+    );
+  }, [navigatedItem?.type]);
+
+  useEffect(() => {
+    if (fileResultData?.data?.length && isFileModalOpen) {
       setOpenResult(mapFileResult(fileResultData.data[0]));
-      navigateBrowser({
-        search: scrollToLine
-          ? '?' +
-            new URLSearchParams({
-              scroll_line_index: scrollToLine.toString(),
-            }).toString()
-          : '',
-      });
       getHoverables(
         fileResultData.data[0].data.relative_path,
         fileResultData.data[0].data.repo_ref,
+        selectedBranch ? selectedBranch : undefined,
       ).then((data) => {
         setOpenResult((prevState) => ({
           ...prevState!,
@@ -58,16 +57,28 @@ const FileModalContainer = ({
         }));
       });
     }
-  }, [fileResultData]);
+  }, [fileResultData, selectedBranch, isFileModalOpen]);
 
   const handleModeChange = useCallback((m: FullResultModeEnum) => {
     setMode(m);
   }, []);
 
+  useEffect(() => {
+    if (!isFileModalOpen) {
+      setOpenResult(null);
+    }
+  }, [isFileModalOpen]);
+
+  useEffect(() => {
+    if (isFileModalOpen && mode === FullResultModeEnum.SIDEBAR) {
+      setFiltersOpen(false);
+    }
+  }, [isFileModalOpen, mode]);
+
   const onResultClosed = useCallback(() => {
-    setOpenResult(null);
-    onClose();
-  }, [mode]);
+    closeFileModalOpen();
+    setFiltersOpen(true);
+  }, [closeFileModalOpen]);
 
   return (
     <ResultModal

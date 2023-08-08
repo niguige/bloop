@@ -13,10 +13,19 @@ import { message, open as openDialog } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
 import * as tauriOs from '@tauri-apps/api/os';
 import { getVersion } from '@tauri-apps/api/app';
+import { BrowserRouter } from 'react-router-dom';
 import ClientApp from '../../../client/src/App';
 import '../../../client/src/index.css';
 import useKeyboardNavigation from '../../../client/src/hooks/useKeyboardNavigation';
 import { getConfig } from '../../../client/src/services/api';
+import { LocaleContext } from '../../../client/src/context/localeContext';
+import i18n from '../../../client/src/i18n';
+import {
+  getPlainFromStorage,
+  LANGUAGE_KEY,
+  savePlainToStorage,
+} from '../../../client/src/services/storage';
+import { LocaleType } from '../../../client/src/types/general';
 import TextSearch from './TextSearch';
 
 // let askedToUpdate = false;
@@ -78,7 +87,6 @@ import TextSearch from './TextSearch';
 //     console.log(error);
 //   }
 // };
-
 function App() {
   const [homeDirectory, setHomeDir] = useState('');
   const [indexFolder, setIndexFolder] = useState('');
@@ -91,6 +99,22 @@ function App() {
   const [release, setRelease] = useState('');
   const contentContainer = useRef<HTMLDivElement>(null);
   const [envConfig, setEnvConfig] = useState({});
+  const [locale, setLocale] = useState<LocaleType>(
+    (getPlainFromStorage(LANGUAGE_KEY) as LocaleType | null) || 'en',
+  );
+
+  useEffect(() => {
+    i18n.changeLanguage(locale);
+    savePlainToStorage(LANGUAGE_KEY, locale);
+  }, [locale]);
+
+  const localeContextValue = useMemo(
+    () => ({
+      locale,
+      setLocale,
+    }),
+    [locale],
+  );
 
   useEffect(() => {
     homeDir().then(setHomeDir);
@@ -163,12 +187,14 @@ function App() {
     [homeDirectory, indexFolder, os, release, envConfig],
   );
   return (
-    <>
+    <LocaleContext.Provider value={localeContextValue}>
       <TextSearch contentRoot={contentContainer.current} />
       <div ref={contentContainer}>
-        <ClientApp deviceContextValue={deviceContextValue} />
+        <BrowserRouter>
+          <ClientApp deviceContextValue={deviceContextValue} />
+        </BrowserRouter>
       </div>
-    </>
+    </LocaleContext.Provider>
   );
 }
 

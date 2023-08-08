@@ -27,7 +27,7 @@ where
     let configuration = {
         let path = app
             .path_resolver()
-            .resolve_resource("config.json")
+            .resolve_resource("config/config.json")
             .expect("failed to resolve resource");
 
         let mut bundled = Configuration::read(path).unwrap();
@@ -38,6 +38,28 @@ where
             .resolve_resource("model")
             .expect("bad bundle");
 
+        bundled.dylib_dir = Some(if cfg!(all(target_os = "macos", debug_assertions)) {
+            app.path_resolver()
+                .resolve_resource("dylibs")
+                .expect("missing `apps/desktop/src-tauri/dylibs`")
+                .parent()
+                .expect("invalid path")
+                .to_owned()
+        } else if cfg!(target_os = "macos") {
+            app.path_resolver()
+                .resolve_resource("dylibs")
+                .expect("missing `apps/desktop/src-tauri/dylibs`")
+                .parent()
+                .expect("invalid path")
+                .parent()
+                .expect("invalid path")
+                .join("Frameworks")
+        } else {
+            app.path_resolver()
+                .resolve_resource("dylibs")
+                .expect("missing `apps/desktop/src-tauri/dylibs`")
+        });
+
         let data_dir = app.path_resolver().app_data_dir().unwrap();
         bundled.index_dir = data_dir.join("bleep");
 
@@ -46,6 +68,8 @@ where
             Configuration::cli_overriding_config_file().unwrap(),
         )
     };
+
+    Application::install_logging(&configuration);
 
     if let Some(dsn) = &configuration.sentry_dsn {
         initialize_sentry(dsn);
@@ -72,6 +96,26 @@ where
         .await;
 
         if let Ok(backend) = initialized {
+            sentry::Hub::main().configure_scope(|scope| {
+                let backend = backend.clone();
+                scope.add_event_processor(move |mut event| {
+                    event.user = Some(sentry_user()).map(|mut user| {
+                        let auth = backend.user();
+                        user.id = Some(
+                            if let (Some(analytics), Some(username)) = (&backend.analytics, &auth) {
+                                analytics.tracking_id(Some(username))
+                            } else {
+                                get_device_id()
+                            },
+                        );
+                        user.username = auth;
+                        user
+                    });
+
+                    Some(event)
+                });
+            });
+
             if let Err(_e) = backend.run().await {
                 app.emit_all(
                     "server-crashed",
@@ -96,37 +140,33 @@ where
 }
 
 fn initialize_sentry(dsn: &str) {
-    if sentry::Hub::current().client().is_some() {
-        tracing::info!("Sentry has already been initialized");
-        return;
+    if SENTRY
+        .set(sentry::init((
+            dsn,
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                before_send: Some(Arc::new(|event| match *TELEMETRY.read().unwrap() {
+                    true => Some(event),
+                    false => None,
+                })),
+                ..Default::default()
+            },
+        )))
+        .is_err()
+    {
+        // i don't see a way how this would trigger, but just to be on
+        // the safe side, make sure we blow up
+        panic!("in the disco");
     }
 
-    let unique_device_id = format!(
-        "{target}-{id}",
-        target = std::env::consts::OS,
-        id = get_device_id()
-    );
-    let user = Some(sentry::protocol::User {
-        id: Some(unique_device_id),
+    sentry::configure_scope(|scope| scope.set_user(Some(sentry_user())));
+}
+
+fn sentry_user() -> sentry::User {
+    sentry::User {
+        other: [("device_id".to_string(), get_device_id().into())].into(),
         ..Default::default()
-    });
-
-    sentry::configure_scope(|scope| {
-        scope.set_user(user);
-    });
-
-    let guard = sentry::init((
-        dsn,
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            before_send: Some(Arc::new(|event| match *TELEMETRY.read().unwrap() {
-                true => Some(event),
-                false => None,
-            })),
-            ..Default::default()
-        },
-    ));
-    _ = SENTRY.set(guard);
+    }
 }
 
 #[cfg(all(not(test), target_os = "macos"))]
@@ -148,7 +188,7 @@ fn get_device_id() -> String {
 
     let output = command.wait_with_output().unwrap();
     let result = std::str::from_utf8(&output.stdout).unwrap();
-    result.into()
+    format!("{target}-{id}", target = std::env::consts::OS, id = result)
 }
 
 #[cfg(all(not(test), target_os = "linux"))]
@@ -158,7 +198,7 @@ fn get_device_id() -> String {
     const STANDARD_MACHINE_ID: &str = "/etc/machine-id";
     const LEGACY_MACHINE_ID: &str = "/var/lib/dbus/machine-id";
 
-    std::fs::read_to_string(STANDARD_MACHINE_ID)
+    let result = std::fs::read_to_string(STANDARD_MACHINE_ID)
         .or_else(|_| {
             warn!(
                 "could not find machine-id at `{}`, looking in `{}`",
@@ -169,7 +209,9 @@ fn get_device_id() -> String {
         .unwrap_or_else(|_| {
             warn!("failed to determine machine-id");
             "unknown-machine-id".to_owned()
-        })
+        });
+
+    format!("{target}-{id}", target = std::env::consts::OS, id = result)
 }
 
 #[cfg(all(not(test), target_os = "windows"))]
@@ -195,7 +237,8 @@ fn get_device_id() -> String {
         .unwrap()
         .trim_start_matches("UUID") // remove the initial `UUID` header
         .trim(); // remove the leading and trailing newlines
-    result.into()
+
+    format!("{target}-{id}", target = std::env::consts::OS, id = result)
 }
 
 // ensure that the leading header and trailer are stripped

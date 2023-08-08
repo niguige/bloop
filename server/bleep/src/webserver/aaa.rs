@@ -91,10 +91,16 @@ impl AuthCookie {
 const STATE_LEN: usize = 32;
 type State = String;
 
+#[derive(serde::Deserialize)]
+pub(super) struct RedirectQuery {
+    redirect_to: Option<String>,
+}
+
 /// Initiate a new login using a web-based OAuth flow.
 pub(super) async fn login(
     Extension(app): Extension<Application>,
     Extension(auth_layer): Extension<Arc<AuthLayer>>,
+    Query(RedirectQuery { redirect_to }): Query<RedirectQuery>,
 ) -> impl IntoResponse {
     auth_layer.clean_old_states();
     if auth_layer.initialized_login.len() >= MAX_PARALLEL_PENDING_LOGINS {
@@ -114,13 +120,17 @@ pub(super) async fn login(
         .expect("github client id must be provided")
         .expose_secret();
 
-    let redirect_uri = format!(
+    let mut redirect_uri = format!(
         "https://{}/api/auth/login/complete",
         app.config
             .instance_domain
             .as_ref()
             .expect("instance domain must be provided")
     );
+
+    if let Some(uri) = redirect_to {
+        redirect_uri = format!("{redirect_uri}%3Fredirect_to={uri}");
+    }
 
     let github_oauth_url = &format!(
         "https://github.com/login/oauth/authorize\
@@ -141,6 +151,7 @@ pub(super) async fn login(
 pub(super) struct AuthorizedParams {
     state: State,
     code: String,
+    redirect_to: Option<String>,
 }
 
 /// Complete the login flow.
@@ -152,7 +163,11 @@ pub(super) async fn authorized(
     Query(params): Query<AuthorizedParams>,
     jar: PrivateCookieJar,
 ) -> impl IntoResponse {
-    let AuthorizedParams { state, code } = params;
+    let AuthorizedParams {
+        state,
+        code,
+        redirect_to,
+    } = params;
 
     auth_layer
         .initialized_login
@@ -185,9 +200,27 @@ pub(super) async fn authorized(
         .await
         .expect("can't retrieve user name");
 
+    app.with_analytics(|analytics| {
+        use rudderanalytics::message::{Identify, Message};
+        analytics.send(Message::Identify(Identify {
+            user_id: Some(analytics.tracking_id(Some(&user_name))),
+            traits: Some(serde_json::json!({
+                "org_name": app.org_name(),
+                "device_id": analytics.device_id(),
+                "is_self_serve": app.env.is_cloud_instance(),
+                "github_username": user_name,
+            })),
+            ..Default::default()
+        }));
+    });
+
     (
         jar.add(AuthCookie::new(gh_token, user_name).to_cookie()),
-        Redirect::to("/"),
+        if let Some(uri) = redirect_to {
+            Redirect::to(&uri)
+        } else {
+            Redirect::to("/")
+        },
     )
 }
 
@@ -244,7 +277,7 @@ async fn authenticate_authorize_reissue<B>(
         bot_auth(auth_header, &app)
             .await
             .context("failed to authenticate bot request")
-            .map(|()| (User(None), jar))
+            .map(|()| (User::Unknown, jar))
     } else {
         Err(anyhow::anyhow!(
             "request had no auth cookie or `Authorization` header"
@@ -280,7 +313,13 @@ async fn user_auth(
     let need_refresh = auth_cookie.need_refresh();
 
     if member_checked && !need_refresh {
-        return Ok((User(Some(auth_cookie.user_id.clone())), jar));
+        return Ok((
+            User::Authenticated {
+                login: auth_cookie.user_id,
+                crab: Arc::new(move || make_octocrab(&auth_cookie.github_token)),
+            },
+            jar,
+        ));
     }
 
     if need_refresh {
@@ -352,7 +391,13 @@ async fn user_auth(
     cookie.set_same_site(SameSite::Strict);
     cookie.set_secure(true);
 
-    Ok((User(Some(user_name)), jar.add(cookie)))
+    Ok((
+        User::Authenticated {
+            login: user_name,
+            crab: Arc::new(move || make_octocrab(&auth_cookie.github_token)),
+        },
+        jar.add(cookie),
+    ))
 }
 
 async fn get_username(octocrab: &Octocrab) -> Result<String, anyhow::Error> {

@@ -1,13 +1,13 @@
 import React, { useContext, useEffect, useState } from 'react';
 import * as Sentry from '@sentry/react';
+import { Trans, useTranslation } from 'react-i18next';
 import ErrorFallback from '../../components/ErrorFallback';
 import LiteLoader from '../../components/Loaders/LiteLoader';
 import Button from '../../components/Button';
 import { CloseSign } from '../../icons';
 import { RepositoriesContext } from '../../context/repositoriesContext';
-import { RepoProvider, RepoType, SyncStatus } from '../../types/general';
+import { RepoType, SyncStatus } from '../../types/general';
 import { DeviceContext } from '../../context/deviceContext';
-import useAnalytics from '../../hooks/useAnalytics';
 import AddRepos from './AddRepos';
 import ReposSection from './ReposSection';
 import AddRepoCard from './AddRepoCard';
@@ -23,6 +23,7 @@ const filterRepositories = (repos?: RepoType[]) => {
 };
 
 const HomePage = () => {
+  const { t } = useTranslation();
   const { fetchRepos, repositories } = useContext(RepositoriesContext);
   const { isSelfServe } = useContext(DeviceContext);
   const [popupOpen, setPopupOpen] = useState(false);
@@ -32,7 +33,6 @@ const HomePage = () => {
   const [reposToShow, setReposToShow] = useState<RepoType[]>(
     filterRepositories(repositories),
   );
-  const { trackReposSynced } = useAnalytics();
 
   useEffect(() => {
     if (repositories) {
@@ -43,8 +43,10 @@ const HomePage = () => {
   return (
     <div className="w-full flex flex-col mx-auto max-w-6.5xl">
       <div className="p-8 pb-0">
-        <h4 className="mb-3">Add</h4>
-        <div className="flex gap-3.5">
+        <h4 className="mb-3">
+          <Trans>Add</Trans>
+        </h4>
+        <div className="flex gap-3.5 pb-2">
           <AddRepoCard type="github" onClick={setAddReposOpen} />
           <AddRepoCard type="public" onClick={setAddReposOpen} />
           {!isSelfServe && (
@@ -61,17 +63,6 @@ const HomePage = () => {
         addRepos={addReposOpen}
         onClose={(isSubmitted) => {
           if (isSubmitted) {
-            trackReposSynced({
-              localRepos:
-                (repositories?.filter((r) => r.provider === RepoProvider.Local)
-                  .length || 0) + (addReposOpen === 'local' ? 1 : 0),
-              githubRepos:
-                (repositories?.filter(
-                  (r) =>
-                    r.provider === RepoProvider.GitHub &&
-                    r.sync_status !== SyncStatus.Uninitialized,
-                ).length || 0) + (addReposOpen === 'local' ? 0 : 1),
-            });
             fetchRepos();
             setTimeout(() => fetchRepos(), 1000);
             setPopupOpen(true);
@@ -86,17 +77,21 @@ const HomePage = () => {
         >
           <LiteLoader />
           <div className="flex flex-col gap-1">
-            <p className="body-s text-label-title">Syncing repository</p>
+            <p className="body-s text-label-title">
+              <Trans>Syncing repository</Trans>
+            </p>
             <p className="caption text-label-base">
-              We are syncing your repository to bloop. This might take a couple
-              of minutes
+              <Trans>
+                We are syncing your repository to bloop. This might take a
+                couple of minutes
+              </Trans>
             </p>
           </div>
           <Button
             variant="tertiary"
             size="tiny"
             onlyIcon
-            title="Close"
+            title={t('Close')}
             onClick={() => setPopupOpen(false)}
           >
             <CloseSign />

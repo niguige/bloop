@@ -60,7 +60,7 @@ module.exports = {
       spacing: {
         "4.5": "1.125rem",
         "11.5": "2.875rem",
-        '13': '3.375rem',
+        '13': '3.25rem',
         "30": "7.5rem",
         "67": "17.7rem",
         "68": "17.75rem",
@@ -193,10 +193,9 @@ module.exports = {
       default: ['Inter', 'sans-serif'],
       code: ['Menlo', 'sans-serif'],
     },
-    namedGroups: ["tooltip","foo", "bar"],
+    namedGroups: ["tooltip","summary"],
   },
   plugins: [
-    require('@tailwindcss/line-clamp'),
-    require('tailwindcss-labeled-groups')(['custom'])
+    require('tailwindcss-labeled-groups')(['custom', 'summary' , 'code'])
   ],
 };
