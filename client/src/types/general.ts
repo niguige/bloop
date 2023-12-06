@@ -1,5 +1,5 @@
 import React, { ReactElement } from 'react';
-import { SearchStepType } from './api';
+import { DocShortType, SearchStepType } from './api';
 import { RepoSource } from './index';
 
 export enum MenuItemType {
@@ -80,6 +80,14 @@ export type RepoUi = RepoType & {
   alreadySynced?: boolean;
 };
 
+export type CodeStudioShortType = {
+  id: string;
+  name: string;
+  modified_at: string;
+  repos: string[];
+  most_common_ext: string;
+};
+
 export enum FullResultModeEnum {
   PAGE,
   SIDEBAR,
@@ -91,14 +99,36 @@ export enum SearchType {
   NL,
 }
 
-export type UITabType = {
+export enum TabType {
+  REPO = 'repo',
+  STUDIO = 'studio',
+  HOME = 'home',
+}
+
+export type RepoTabType = {
   key: string;
   name: string;
   repoName: string;
+  repoRef: string;
   source: RepoSource;
   branch?: string | null;
   navigationHistory: NavigationItem[];
+  type: TabType.REPO;
 };
+
+export type HomeTabType = {
+  key: string;
+  name: string;
+  type: TabType.HOME;
+};
+
+export type StudioTabType = {
+  key: string;
+  name: string;
+  type: TabType.STUDIO;
+};
+
+export type UITabType = RepoTabType | HomeTabType | StudioTabType;
 
 export type TabHistoryType = {
   tabKey: string;
@@ -139,9 +169,18 @@ export enum ChatMessageAuthor {
   Server = 'server',
 }
 
-type ChatMessageUser = {
+export enum ParsedQueryTypeEnum {
+  TEXT = 'text',
+  PATH = 'path',
+  LANG = 'lang',
+  BRANCH = 'branch',
+}
+export type ParsedQueryType = { type: ParsedQueryTypeEnum; text: string };
+
+export type ChatMessageUser = {
   author: ChatMessageAuthor.User;
   text: string;
+  parsedQuery?: ParsedQueryType[];
   isFromHistory?: boolean;
 };
 
@@ -210,13 +249,18 @@ export type ChatMessageServer = {
   loadingSteps: ChatLoadingStep[];
   error?: string;
   isFromHistory?: boolean;
-  results?: string;
+  conclusion?: string;
   queryId: string;
   responseTimestamp: string;
   explainedFile?: string;
 };
 
 export type ChatMessage = ChatMessageUser | ChatMessageServer;
+
+export type OpenChatHistoryItem = {
+  conversation: ChatMessage[];
+  threadId: string;
+};
 
 export interface NavigationItem {
   type:
@@ -252,7 +296,9 @@ export type EnvConfig = {
   };
   bloop_user_profile?: {
     prompt_guide?: string;
+    allow_session_recordings?: boolean;
   };
+  credentials_upgrade?: boolean;
 };
 
 export type IpynbOutputType = {
@@ -308,4 +354,108 @@ export type FileHighlightsType = Record<
   ({ lines: [number, number]; color: string; index: number } | undefined)[]
 >;
 
-export type LocaleType = 'en' | 'ja' | 'zhCN';
+export type LocaleType = 'en' | 'ja' | 'zhCN' | 'es' | 'it';
+
+export enum StudioConversationMessageAuthor {
+  USER = 'User',
+  ASSISTANT = 'Assistant',
+}
+
+export type StudioConversationMessage = {
+  author: StudioConversationMessageAuthor;
+  message: string;
+  error?: string;
+};
+
+export type DiffChunkType = {
+  file: string;
+  lang: string;
+  repo: string;
+  branch: string | null;
+  hunks: DiffHunkType[];
+  raw_patch: string;
+};
+
+export type DiffHunkType = {
+  line_start: number;
+  patch: string;
+};
+
+export enum StudioLeftPanelType {
+  CONTEXT = 'context',
+  TEMPLATES = 'templates',
+  FILE = 'file',
+  DIFF = 'diff',
+  DOCS = 'docs',
+}
+
+export enum StudioRightPanelType {
+  CONVERSATION = 'conversation',
+}
+
+export type FileStudioPanelType = {
+  type: StudioLeftPanelType.FILE;
+  data: {
+    repo: RepoType;
+    branch: string | null;
+    filePath: string;
+    isFileInContext: boolean;
+    initialRanges?: [number, number][];
+  };
+};
+
+export type DocsStudioPanelType = {
+  type: StudioLeftPanelType.DOCS;
+  data: {
+    docProvider: DocShortType;
+    url: string;
+    absoluteUrl: string;
+    title: string;
+    selectedSection?: string;
+    isDocInContext: boolean;
+    initialSections?: string[];
+  };
+};
+
+export type DiffPanelType = {
+  type: StudioLeftPanelType.DIFF;
+  data: {
+    repo: RepoType;
+    branch: string | null;
+    filePath: string;
+    hunks: DiffHunkType[];
+  };
+};
+
+export type StudioLeftPanelDataType =
+  | {
+      type: StudioLeftPanelType.CONTEXT | StudioLeftPanelType.TEMPLATES;
+      data?: null;
+    }
+  | FileStudioPanelType
+  | DocsStudioPanelType
+  | DiffPanelType;
+
+export type StudioRightPanelDataType = {
+  type: StudioRightPanelType.CONVERSATION;
+  data?: null;
+};
+
+export type StudioContextFile = {
+  path: string;
+  ranges: { start: number; end: number }[];
+  repo: string;
+  branch: string | null;
+  hidden: boolean;
+};
+
+export type StudioContextDoc = {
+  doc_id: string;
+  doc_source: string;
+  doc_icon: string | null;
+  doc_title: string | null;
+  relative_url: string;
+  absolute_url: string;
+  ranges: string[];
+  hidden: boolean;
+};

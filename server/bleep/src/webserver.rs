@@ -1,21 +1,24 @@
 use crate::{env::Feature, Application};
 
 use axum::{
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json,
 };
-use std::{borrow::Cow, net::SocketAddr};
+use std::{borrow::Cow, fmt, net::SocketAddr};
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
 use tracing::info;
 
-mod aaa;
+pub mod aaa;
 pub mod answer;
 mod autocomplete;
+mod commits;
 mod config;
+mod docs;
 mod file;
 mod github;
 mod hoverable;
@@ -23,8 +26,11 @@ mod index;
 mod intelligence;
 pub mod middleware;
 mod query;
+mod quota;
 pub mod repos;
-mod semantic;
+mod search;
+mod studio;
+mod template;
 
 pub type Router<S = Application> = axum::Router<S>;
 
@@ -50,11 +56,34 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
         .route("/index", get(index::handle))
         // repo management
         .nest("/repos", repos::router())
+        // docs management
+        .nest(
+            "/docs",
+            Router::new()
+                .route("/", get(docs::list)) // list all doc providers
+                .route("/search", get(docs::search)) // text search over doc providers
+                .route("/sync", get(docs::sync)) // index a new doc provider
+                .route("/verify", get(docs::verify)) // verify if a doc url is valid
+                .route("/:id", get(docs::list_one)) // list a doc provider by id
+                .route("/:id", delete(docs::delete)) // delete a doc provider by id
+                .route("/:id/resync", get(docs::resync)) // resync a doc provider by id
+                .route("/:id/search", get(docs::search_with_id)) // search/list sections of a doc provider
+                .route("/:id/list", get(docs::list_with_id)) // list pages of a doc provider
+                .route("/:id/fetch", get(docs::fetch)), // fetch all sections of a page of a doc provider
+        )
         // intelligence
+        .route("/tutorial-questions", get(commits::tutorial_questions))
         .route("/hoverable", get(hoverable::handle))
         .route("/token-info", get(intelligence::handle))
+        .route("/related-files", get(intelligence::related_files))
+        .route(
+            "/related-files-with-ranges",
+            get(intelligence::related_file_with_ranges),
+        )
+        .route("/token-value", get(intelligence::token_value))
         // misc
-        .route("/search", get(semantic::complex_search))
+        .route("/search/code", get(search::semantic_code))
+        .route("/search/path", get(search::fuzzy_path))
         .route("/file", get(file::handle))
         .route("/answer", get(answer::answer))
         .route("/answer/explain", get(answer::explain))
@@ -66,17 +95,52 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
             "/answer/conversations/:thread_id",
             get(answer::conversations::thread),
         )
-        .route("/answer/vote", post(answer::vote));
+        .route("/answer/vote", post(answer::vote))
+        .route("/studio", post(studio::create))
+        .route("/studio", get(studio::list))
+        .route(
+            "/studio/:studio_id",
+            get(studio::get).patch(studio::patch).delete(studio::delete),
+        )
+        .route("/studio/import", post(studio::import))
+        .route("/studio/:studio_id/generate", get(studio::generate))
+        .route("/studio/:studio_id/diff", get(studio::diff))
+        .route("/studio/:studio_id/diff/apply", post(studio::diff_apply))
+        .route("/studio/:studio_id/snapshots", get(studio::list_snapshots))
+        .route(
+            "/studio/:studio_id/snapshots/:snapshot_id",
+            delete(studio::delete_snapshot),
+        )
+        .route(
+            "/studio/file-token-count",
+            post(studio::get_file_token_count),
+        )
+        .route(
+            "/studio/doc-file-token-count",
+            post(studio::get_doc_file_token_count),
+        )
+        .route("/template", post(template::create))
+        .route("/template", get(template::list))
+        .route(
+            "/template/:id",
+            get(template::get)
+                .patch(template::patch)
+                .delete(template::delete),
+        )
+        .route("/quota", get(quota::get))
+        .route(
+            "/quota/create-checkout-session",
+            get(quota::create_checkout_session),
+        );
 
     if app.env.allow(Feature::AnyPathScan) {
         api = api.route("/repos/scan", get(repos::scan_local));
     }
 
-    if app.env.allow(Feature::GithubDeviceFlow) {
+    if app.env.allow(Feature::DesktopUserAuth) {
         api = api
-            .route("/remotes/github/login", get(github::login))
-            .route("/remotes/github/logout", get(github::logout))
-            .route("/remotes/github/status", get(github::status));
+            .route("/auth/login", get(github::login))
+            .route("/auth/logout", get(github::logout));
     }
 
     api = api.route("/panic", get(|| async { panic!("dead") }));
@@ -84,7 +148,7 @@ pub async fn start(app: Application) -> anyhow::Result<()> {
     // Note: all routes above this point must be authenticated.
     // These middlewares MUST provide the `middleware::User` extension.
     if app.env.allow(Feature::AuthorizationRequired) {
-        api = aaa::router(middleware::sentry_layer(api), app.clone());
+        api = aaa::router(middleware::sentry_layer(api), app.clone()).await;
     } else {
         api = middleware::local_user(middleware::sentry_layer(api), app.clone());
     }
@@ -134,9 +198,16 @@ where
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+#[derive(Debug)]
 pub struct Error {
     status: StatusCode,
-    body: Json<Response<'static>>,
+    body: EndpointError<'static>,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.body.message)
+    }
 }
 
 impl Error {
@@ -151,10 +222,10 @@ impl Error {
             ErrorKind::NotFound => StatusCode::NOT_FOUND,
         };
 
-        let body = Json(Response::from(EndpointError {
+        let body = EndpointError {
             kind,
             message: message.into(),
-        }));
+        };
 
         Error { status, body }
     }
@@ -167,40 +238,63 @@ impl Error {
     fn internal<S: std::fmt::Display>(message: S) -> Self {
         Error {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            body: Json(Response::from(EndpointError {
+            body: EndpointError {
                 kind: ErrorKind::Internal,
                 message: message.to_string().into(),
-            })),
+            },
         }
     }
 
     fn user<S: std::fmt::Display>(message: S) -> Self {
         Error {
             status: StatusCode::BAD_REQUEST,
-            body: Json(Response::from(EndpointError {
+            body: EndpointError {
                 kind: ErrorKind::User,
                 message: message.to_string().into(),
-            })),
+            },
+        }
+    }
+
+    fn not_found<S: std::fmt::Display>(message: S) -> Self {
+        Error {
+            status: StatusCode::NOT_FOUND,
+            body: EndpointError {
+                kind: ErrorKind::NotFound,
+                message: message.to_string().into(),
+            },
+        }
+    }
+
+    fn unauthorized<S: std::fmt::Display>(message: S) -> Self {
+        Error {
+            status: StatusCode::UNAUTHORIZED,
+            body: EndpointError {
+                kind: ErrorKind::User,
+                message: message.to_string().into(),
+            },
         }
     }
 
     fn message(&self) -> &str {
-        match &self.body {
-            Json(Response::Error(EndpointError { message, .. })) => message.as_ref(),
-            _ => "",
-        }
+        self.body.message.as_ref()
     }
 }
 
 impl From<anyhow::Error> for Error {
     fn from(value: anyhow::Error) -> Self {
-        Error::internal(value.to_string())
+        Error::internal(value)
+    }
+}
+
+impl From<sqlx::Error> for Error {
+    fn from(value: sqlx::Error) -> Self {
+        Error::internal(value)
     }
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
-        (self.status, self.body).into_response()
+        (self.status, Json(Response::from(self.body))).into_response()
     }
 }
 
@@ -256,10 +350,8 @@ impl<'a> From<EndpointError<'a>> for Response<'a> {
     }
 }
 
-async fn health(Extension(app): Extension<Application>) {
-    if let Some(ref semantic) = app.semantic {
-        // panic is fine here, we don't need exact reporting of
-        // subsystem checks at this stage
-        semantic.health_check().await.unwrap()
-    }
+async fn health(State(app): State<Application>) {
+    // panic is fine here, we don't need exact reporting of
+    // subsystem checks at this stage
+    app.semantic.health_check().await.unwrap()
 }

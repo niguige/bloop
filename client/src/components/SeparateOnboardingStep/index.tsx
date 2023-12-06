@@ -4,6 +4,8 @@ import { MODAL_SIDEBAR_APPEAR_ANIMATION } from '../../consts/animations';
 
 type Props = {
   isVisible: boolean;
+  noWrapper?: boolean;
+  noBg?: boolean;
   onClose?: () => void;
 };
 
@@ -39,6 +41,8 @@ const SeparateOnboardingStep = ({
   onClose,
   children,
   isVisible,
+  noWrapper,
+  noBg,
 }: PropsWithChildren<Props>) => {
   return (
     <>
@@ -59,8 +63,11 @@ const SeparateOnboardingStep = ({
       <AnimatePresence>
         {isVisible && (
           <motion.div
-            className={`overflow-auto fixed flex flex-col rounded-md shadow-float bg-bg-shade
-            border border-bg-border z-70 backdrop-blur-8`}
+            className={`fixed flex flex-col rounded-md ${
+              noBg
+                ? ''
+                : 'bg-bg-shade border border-bg-border backdrop-blur-8 shadow-float overflow-auto'
+            } z-70`}
             animate={modalAnimation}
             initial={initialModalStyles}
             exit={initialModalStyles}
@@ -68,9 +75,13 @@ const SeparateOnboardingStep = ({
             aria-modal="true"
             transition={MODAL_SIDEBAR_APPEAR_ANIMATION}
           >
-            <div className="p-6 flex flex-col gap-8 w-99 relative flex-1 overflow-auto">
-              {children}
-            </div>
+            {noWrapper ? (
+              children
+            ) : (
+              <div className="p-6 flex flex-col gap-8 w-99 relative flex-1 overflow-auto">
+                {children}
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>

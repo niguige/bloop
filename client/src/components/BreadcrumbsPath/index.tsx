@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useMemo } from 'react';
 import Breadcrumbs, { PathParts } from '../Breadcrumbs';
 import {
   breadcrumbsItemPath,
@@ -14,13 +14,27 @@ type Props = {
   path: string;
   repo: string;
   onClick?: (path: string, fileType?: FileTreeFileType) => void;
+  shouldGoToFile?: boolean;
+  nonInteractive?: boolean;
+  allowOverflow?: boolean;
+  scrollContainerRef?: React.MutableRefObject<HTMLDivElement | null>;
 } & Omit<BProps, 'pathParts'>;
 
-const BreadcrumbsPath = ({ path, onClick, repo, ...rest }: Props) => {
-  const { navigateRepoPath } = useAppNavigation();
-  const mapPath = useCallback(() => {
+const BreadcrumbsPath = ({
+  path,
+  onClick,
+  repo,
+  shouldGoToFile,
+  allowOverflow,
+  scrollContainerRef,
+  ...rest
+}: Props) => {
+  const { navigateRepoPath, navigateFullResult } = useAppNavigation();
+  const pathParts: PathParts[] = useMemo(() => {
     return splitPathForBreadcrumbs(path, (e, item, index, pParts) => {
-      e.stopPropagation();
+      if (onClick) {
+        e.stopPropagation();
+      }
       const isLastPart = index === pParts.length - 1;
       const newPath = breadcrumbsItemPath(
         pParts,
@@ -35,18 +49,25 @@ const BreadcrumbsPath = ({ path, onClick, repo, ...rest }: Props) => {
       if (!isLastPart) {
         navigateRepoPath(repo, newPath);
       }
+      if (shouldGoToFile && isLastPart) {
+        navigateFullResult(path);
+      }
     });
-  }, [path]);
-
-  const [pathParts, setPathParts] = useState<PathParts[]>(mapPath());
-
-  useEffect(() => {
-    setPathParts(mapPath());
-  }, [path]);
+  }, [path, shouldGoToFile, onClick, repo]);
 
   return (
-    <div className="overflow-hidden w-full">
-      <Breadcrumbs {...rest} pathParts={pathParts} path={path} />
+    <div
+      className={`${
+        allowOverflow ? 'overflow-auto' : 'overflow-hidden'
+      } w-full`}
+      ref={scrollContainerRef}
+    >
+      <Breadcrumbs
+        {...rest}
+        pathParts={pathParts}
+        path={path}
+        allowOverflow={allowOverflow}
+      />
     </div>
   );
 };

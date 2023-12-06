@@ -1,4 +1,3 @@
-use secrecy::ExposeSecret;
 use std::{panic::AssertUnwindSafe, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
@@ -13,7 +12,7 @@ use axum::{
 use futures::{future::Either, stream, StreamExt};
 use reqwest::StatusCode;
 use serde_json::json;
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 use self::conversations::ConversationId;
 
@@ -22,11 +21,10 @@ use crate::{
     agent::{
         self,
         exchange::{CodeChunk, Exchange, FocusedChunk},
-        Action, Agent,
+        Action, Agent, ExchangeState,
     },
     analytics::{EventData, QueryEvent},
     db::QueryLog,
-    llm_gateway,
     query::parser::{self, Literal},
     repo::RepoRef,
     Application,
@@ -71,6 +69,8 @@ pub(super) async fn vote(
 pub struct Answer {
     pub q: String,
     pub repo_ref: RepoRef,
+    #[serde(default = "default_model")]
+    pub model: agent::model::AnswerModel,
     #[serde(default = "default_thread_id")]
     pub thread_id: uuid::Uuid,
     /// Optional id of the parent of the exchange to overwrite
@@ -82,16 +82,21 @@ fn default_thread_id() -> uuid::Uuid {
     uuid::Uuid::new_v4()
 }
 
+fn default_model() -> agent::model::AnswerModel {
+    agent::model::GPT_3_5_TURBO_FINETUNED
+}
+
 pub(super) async fn answer(
     Query(params): Query<Answer>,
     Extension(app): Extension<Application>,
     Extension(user): Extension<User>,
 ) -> super::Result<impl IntoResponse> {
+    info!(?params.q, "handling /answer query");
     let query_id = uuid::Uuid::new_v4();
 
     let conversation_id = ConversationId {
         user_id: user
-            .login()
+            .username()
             .ok_or_else(|| super::Error::user("didn't have user ID"))?
             .to_string(),
         thread_id: params.thread_id,
@@ -121,11 +126,7 @@ pub(super) async fn answer(
         exchanges.truncate(truncate_from_index);
     }
 
-    let query = parser::parse_nl(q)
-        .context("parse error")?
-        .into_semantic()
-        .context("got a 'Grep' query")?
-        .into_owned();
+    let query = parser::parse_nl(q).context("parse error")?.into_owned();
     let query_target = query
         .target
         .as_ref()
@@ -134,6 +135,8 @@ pub(super) async fn answer(
         .context("user query was not plain text")?
         .clone()
         .into_owned();
+
+    debug!(?query_target, "parsed query target");
 
     let action = Action::Query(query_target);
     exchanges.push(Exchange::new(query_id, query));
@@ -174,6 +177,8 @@ async fn execute_agent(
     .await;
 
     if let Err(err) = response.as_ref() {
+        error!(?err, "failed to handle /answer query");
+
         app.track_query(
             &user,
             &QueryEvent {
@@ -203,14 +208,10 @@ async fn try_execute_agent(
 > {
     QueryLog::new(&app.sql).insert(&params.q).await?;
 
-    let gh_token = app
-        .github_token()
-        .map_err(|e| super::Error::user(e).with_status(StatusCode::UNAUTHORIZED))?
-        .map(|s| s.expose_secret().clone());
-
-    let llm_gateway = llm_gateway::Client::new(&app.config.answer_api_url)
+    let llm_gateway = user
+        .llm_gateway(&app)
+        .await?
         .temperature(0.0)
-        .bearer(gh_token)
         .session_reference_id(conversation_id.to_string());
 
     // confirm client compatibility with answer-api
@@ -227,9 +228,12 @@ async fn try_execute_agent(
             });
             return Ok(Sse::new(Box::pin(out_of_date)));
         }
-        // the Ok(_) case should be unreachable
-        Ok(_) | Err(_) => {
-            warn!("failed to check compatibility ... defaulting to `incompatible`");
+        Ok(_) => unreachable!(),
+        Err(err) => {
+            warn!(
+                ?err,
+                "failed to check compatibility ... defaulting to `incompatible`"
+            );
             let failed_to_check = futures::stream::once(async {
                 Ok(sse::Event::default()
                     .json_data(serde_json::json!({"Err": "failed to check compatibility"}))
@@ -242,6 +246,7 @@ async fn try_execute_agent(
     let Answer {
         thread_id,
         repo_ref,
+        model,
         ..
     } = params.clone();
     let stream = async_stream::try_stream! {
@@ -256,7 +261,8 @@ async fn try_execute_agent(
             user,
             thread_id,
             query_id,
-            complete: false,
+            exchange_state: ExchangeState::Pending,
+            model,
         };
 
         let mut exchange_rx = tokio_stream::wrappers::ReceiverStream::new(exchange_rx);
@@ -307,6 +313,8 @@ async fn try_execute_agent(
             }
         };
 
+        agent.complete(result.is_ok());
+
         match result {
             Ok(_) => {}
             Err(agent::Error::Timeout(duration)) => {
@@ -325,10 +333,6 @@ async fn try_execute_agent(
                 Err(e)?;
             }
         }
-
-        // Storing the conversation here allows us to make subsequent requests.
-        conversations::store(&agent.app.sql, conversation_id, (agent.repo_ref.clone(), agent.exchanges.clone())).await?;
-        agent.complete();
     };
 
     let init_stream = futures::stream::once(async move {
@@ -380,32 +384,30 @@ pub async fn explain(
     let virtual_req = Answer {
         q: format!(
             "Explain lines {} - {} in {}",
-            params.line_start, params.line_end, params.relative_path
+            params.line_start + 1,
+            params.line_end + 1,
+            params.relative_path
         ),
         repo_ref: params.repo_ref,
         thread_id: params.thread_id,
         parent_exchange_id: None,
+        model: agent::model::GPT_4,
     };
 
     let conversation_id = ConversationId {
         thread_id: params.thread_id,
         user_id: user
-            .login()
+            .username()
             .ok_or_else(|| super::Error::user("didn't have user ID"))?
             .to_string(),
     };
 
     let mut query = parser::parse_nl(&virtual_req.q)
         .context("failed to parse virtual answer query")?
-        .into_semantic()
-        // We synthesize the query, this should never fail.
-        .unwrap()
         .into_owned();
 
     if let Some(branch) = params.branch {
-        query
-            .branch
-            .insert(Literal::Plain(std::borrow::Cow::Owned(branch)));
+        query.branch.push(Literal::Plain(branch.into()));
     }
 
     let file_content = app
@@ -419,8 +421,8 @@ pub async fn explain(
 
     let snippet = file_content
         .lines()
-        .skip(params.line_start.saturating_sub(1))
-        .take(params.line_end + 1 - params.line_start)
+        .skip(params.line_start)
+        .take(params.line_end - params.line_start)
         .collect::<Vec<_>>()
         .join("\n");
 

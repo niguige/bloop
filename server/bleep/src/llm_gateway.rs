@@ -88,6 +88,7 @@ pub mod api {
         #[serde(default)]
         pub extra_stop_sequences: Vec<String>,
         pub session_reference_id: Option<String>,
+        pub quota_gated: bool,
     }
 
     #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize)]
@@ -159,8 +160,9 @@ impl From<&api::Message> for tiktoken_rs::ChatCompletionRequestMessage {
             api::Message::PlainText { role, content } => {
                 tiktoken_rs::ChatCompletionRequestMessage {
                     role: role.clone(),
-                    content: content.clone(),
+                    content: Some(content.clone()),
                     name: None,
+                    function_call: None,
                 }
             }
             api::Message::FunctionReturn {
@@ -169,8 +171,9 @@ impl From<&api::Message> for tiktoken_rs::ChatCompletionRequestMessage {
                 content,
             } => tiktoken_rs::ChatCompletionRequestMessage {
                 role: role.clone(),
-                content: content.clone(),
+                content: Some(content.clone()),
                 name: Some(name.clone()),
+                function_call: None,
             },
             api::Message::FunctionCall {
                 role,
@@ -178,16 +181,23 @@ impl From<&api::Message> for tiktoken_rs::ChatCompletionRequestMessage {
                 content: _,
             } => tiktoken_rs::ChatCompletionRequestMessage {
                 role: role.clone(),
-                content: serde_json::to_string(&function_call).unwrap(),
+                content: None,
                 name: None,
+                function_call: Some(tiktoken_rs::FunctionCall {
+                    name: function_call
+                        .name
+                        .clone()
+                        .expect("FunctionCall has no name"),
+                    arguments: function_call.arguments.clone(),
+                }),
             },
         }
     }
 }
 
 enum ChatError {
-    BadRequest,
-    TooManyRequests,
+    BadRequest(String),
+    TooManyRequests(String),
     Other(anyhow::Error),
 }
 
@@ -205,6 +215,7 @@ pub struct Client {
     pub provider: api::Provider,
     pub model: Option<String>,
     pub session_reference_id: Option<String>,
+    pub quota_gated: bool,
 }
 
 impl Client {
@@ -222,6 +233,7 @@ impl Client {
             frequency_penalty: None,
             model: None,
             session_reference_id: None,
+            quota_gated: false,
         }
     }
 
@@ -235,6 +247,7 @@ impl Client {
         self
     }
 
+    #[allow(unused)]
     pub fn frequency_penalty(mut self, frequency: impl Into<Option<f32>>) -> Self {
         self.frequency_penalty = frequency.into();
         self
@@ -267,6 +280,11 @@ impl Client {
         self
     }
 
+    pub fn quota_gated(mut self, quota_gated: bool) -> Self {
+        self.quota_gated = quota_gated;
+        self
+    }
+
     pub async fn is_compatible(
         &self,
         version: semver::Version,
@@ -282,30 +300,61 @@ impl Client {
         &self,
         messages: &[api::Message],
         functions: Option<&[api::Function]>,
+    ) -> anyhow::Result<String> {
+        const TOTAL_CHAT_RETRIES: usize = 5;
+
+        'retry_loop: for _ in 0..TOTAL_CHAT_RETRIES {
+            let mut buf = String::new();
+            let stream = self.chat_stream(messages, functions).await?;
+            tokio::pin!(stream);
+
+            loop {
+                match stream.next().await {
+                    None => break,
+                    Some(Ok(s)) => buf += &s,
+                    Some(Err(e)) => {
+                        warn!(?e, "token stream errored out, retrying...");
+                        continue 'retry_loop;
+                    }
+                }
+            }
+
+            return Ok(buf);
+        }
+
+        Err(anyhow!(
+            "chat stream errored too many times, failed to generate response"
+        ))
+    }
+
+    pub async fn chat_stream(
+        &self,
+        messages: &[api::Message],
+        functions: Option<&[api::Function]>,
     ) -> anyhow::Result<impl Stream<Item = anyhow::Result<String>>> {
         const INITIAL_DELAY: Duration = Duration::from_millis(100);
         const SCALE_FACTOR: f32 = 1.5;
 
         let mut delay = INITIAL_DELAY;
         for _ in 0..self.max_retries {
-            match self.chat_oneshot(messages, functions).await {
-                Err(ChatError::TooManyRequests) => {
+            match self.chat_stream_oneshot(messages, functions).await {
+                Err(ChatError::TooManyRequests(_)) => {
                     warn!(?delay, "too many LLM requests, retrying with delay...");
                     tokio::time::sleep(delay).await;
                     delay = Duration::from_millis((delay.as_millis() as f32 * SCALE_FACTOR) as u64);
                 }
-                Err(ChatError::BadRequest) => {
+                Err(ChatError::BadRequest(body)) => {
                     // We log the messages in a separate `debug!` statement so that they can be
                     // filtered out, due to their verbosity.
                     debug!("LLM message list: {messages:?}");
-                    error!("LLM request failed, request not eligible for retry");
-                    bail!("request not eligible for retry");
+                    error!("LLM request failed, request not eligible for retry: {body}");
+                    bail!("request failed (not eligible for retry): {body}");
                 }
                 Err(ChatError::Other(e)) => {
                     // We log the messages in a separate `debug!` statement so that they can be
                     // filtered out, due to their verbosity.
                     debug!("LLM message list: {messages:?}");
-                    error!("LLM request failed due to unknown reason: {e}");
+                    error!("LLM request failed due to unknown reason: {e:?}");
                     return Err(e);
                 }
                 Ok(stream) => return Ok(stream),
@@ -316,14 +365,14 @@ impl Client {
     }
 
     /// Like `chat`, but without exponential backoff.
-    async fn chat_oneshot(
+    async fn chat_stream_oneshot(
         &self,
         messages: &[api::Message],
         functions: Option<&[api::Function]>,
     ) -> Result<impl Stream<Item = anyhow::Result<String>>, ChatError> {
         let mut event_source = Box::pin(
             EventSource::new({
-                let mut builder = self.http.post(format!("{}/v1/q", self.base_url));
+                let mut builder = self.http.post(format!("{}/v2/q", self.base_url));
 
                 if let Some(bearer) = &self.bearer_token {
                     builder = builder.bearer_auth(bearer);
@@ -344,6 +393,7 @@ impl Client {
                     model: self.model.clone(),
                     extra_stop_sequences: vec![],
                     session_reference_id: self.session_reference_id.clone(),
+                    quota_gated: self.quota_gated,
                 })
             })
             // We don't have a `Stream` body so this can't fail.
@@ -358,20 +408,30 @@ impl Client {
 
         match event_source.next().await {
             Some(Ok(reqwest_eventsource::Event::Open)) => {}
-            Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status)))
+            Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)))
                 if status == StatusCode::BAD_REQUEST =>
             {
-                warn!("bad request to LLM");
-                return Err(ChatError::BadRequest);
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| ChatError::Other(anyhow!(e)))?;
+                warn!("bad request to LLM: {body}");
+                return Err(ChatError::BadRequest(body));
             }
-            Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status)))
+            Some(Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)))
                 if status == StatusCode::TOO_MANY_REQUESTS =>
             {
-                warn!("too many requests to LLM");
-                return Err(ChatError::TooManyRequests);
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| ChatError::Other(anyhow!(e)))?;
+                warn!("too many requests to LLM: {body}");
+                return Err(ChatError::TooManyRequests(body));
             }
             Some(Err(e)) => {
-                return Err(ChatError::Other(anyhow!("event source error: {:?}", e)));
+                return Err(ChatError::Other(anyhow!(
+                    "failed to make event source request to answer API: {e}",
+                )));
             }
             _ => {
                 return Err(ChatError::Other(anyhow!("event source failed to open")));

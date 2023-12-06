@@ -1,24 +1,30 @@
 use either::Either;
 use tokio::sync::OwnedSemaphorePermit;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     cache::FileCache,
     indexes,
     remotes::RemoteError,
-    repo::{Backend, RepoError, RepoMetadata, RepoRef, Repository, SyncStatus},
+    repo::{
+        iterator::FileFilterRule, Backend, FileFilterConfig, FilterUpdate, RepoError, RepoMetadata,
+        RepoRef, Repository, SyncStatus,
+    },
     Application,
 };
 
-use std::{path::PathBuf, sync::Arc};
+use std::{borrow::Borrow, num::NonZeroU32, path::PathBuf, sync::Arc};
 
 use super::control::SyncPipes;
 
-pub(crate) struct SyncHandle {
+pub struct SyncHandle {
     pub(crate) reporef: RepoRef,
-    pub(crate) new_branch_filters: Option<crate::repo::BranchFilter>,
+    pub(crate) filter_updates: FilterUpdate,
+    pub(crate) pipes: SyncPipes,
+    pub(crate) file_cache: FileCache,
     pub(crate) app: Application,
-    pub(super) pipes: SyncPipes,
+    pub(crate) shallow_config: gix::remote::fetch::Shallow,
+    shallow: bool,
     exited: flume::Sender<SyncStatus>,
     exit_signal: flume::Receiver<SyncStatus>,
 }
@@ -50,8 +56,14 @@ pub(super) enum SyncError {
     #[error("sql: {0:?}")]
     Sql(anyhow::Error),
 
+    #[error("syncing in progress")]
+    SyncInProgress,
+
     #[error("cancelled by user")]
     Cancelled,
+
+    #[error("repo removed by the user")]
+    Removed,
 }
 
 impl PartialEq for SyncHandle {
@@ -86,15 +98,73 @@ impl Drop for SyncHandle {
     }
 }
 
+pub struct SyncConfig {
+    app: Application,
+    reporef: RepoRef,
+    filter_updates: Option<FilterUpdate>,
+    shallow: bool,
+}
+
+impl SyncConfig {
+    pub fn new(app: impl Borrow<Application>, reporef: RepoRef) -> SyncConfig {
+        SyncConfig {
+            app: app.borrow().clone(),
+            reporef,
+            filter_updates: None,
+            shallow: false,
+        }
+    }
+
+    pub fn filter_updates(mut self, update: Option<FilterUpdate>) -> Self {
+        self.filter_updates = update;
+        self
+    }
+
+    pub fn shallow(mut self, shallow: bool) -> Self {
+        self.shallow = shallow;
+        self
+    }
+
+    pub async fn into_handle(self) -> Arc<SyncHandle> {
+        SyncHandle::new(self).await
+    }
+}
+
 impl SyncHandle {
-    pub(crate) async fn new(
-        app: Application,
-        reporef: RepoRef,
-        status: super::ProgressStream,
-        new_branch_filters: Option<crate::repo::BranchFilter>,
-    ) -> Arc<Self> {
+    async fn new(config: SyncConfig) -> Arc<Self> {
+        let SyncConfig {
+            app,
+            reporef,
+            filter_updates,
+            shallow,
+            ..
+        } = config;
+        let status = app.sync_queue.broadcast();
+
+        let mut shallow_config = if shallow {
+            gix::remote::fetch::Shallow::DepthAtRemote(NonZeroU32::new(1).unwrap())
+        } else {
+            gix::remote::fetch::Shallow::DepthAtRemote(NonZeroU32::new(1000).unwrap())
+        };
+
+        // Going through an extra hoop here to ensure the outward
+        // facing interface communicates intent.
+        //
+        // How filter updates work specifically should not have to
+        // trickle down to all callers.
+        let filter_updates = if shallow {
+            FilterUpdate {
+                file_filter: Some(FileFilterConfig {
+                    rules: vec![FileFilterRule::ExcludeRegex(".*".into())],
+                }),
+                ..Default::default()
+            }
+        } else {
+            filter_updates.unwrap_or_default()
+        };
+
         let (exited, exit_signal) = flume::bounded(1);
-        let pipes = SyncPipes::new(reporef.clone(), new_branch_filters.clone(), status);
+        let pipes = SyncPipes::new(reporef.clone(), filter_updates.clone(), status);
         let current = app
             .repo_pool
             .entry_async(reporef.clone())
@@ -113,20 +183,33 @@ impl SyncHandle {
                     Repository {
                         disk_path,
                         remote,
+                        shallow,
                         sync_status: SyncStatus::Queued,
+                        pub_sync_status: SyncStatus::Queued,
                         last_index_unix_secs: 0,
                         last_commit_unix_secs: 0,
                         most_common_lang: None,
                         branch_filter: None,
+                        file_filter: Default::default(),
+                        locked: false,
                     }
                 }
             });
 
+        // if we're not upgrading from shallow to full checkout
+        // this seems to be a speed optimization for git operations
+        if !shallow && !current.get().shallow {
+            shallow_config = gix::remote::fetch::Shallow::NoChange;
+        }
+
         let sh = Self {
             app: app.clone(),
             reporef: reporef.clone(),
+            file_cache: FileCache::new(app.sql.clone(), app.semantic.clone()),
+            shallow_config,
+            shallow,
             pipes,
-            new_branch_filters,
+            filter_updates,
             exited,
             exit_signal,
         };
@@ -152,9 +235,18 @@ impl SyncHandle {
             .unwrap_or(false);
 
         if !removed {
-            if let Err(err) = self.sync().await {
-                error!(?err, ?self.reporef, "failed to sync repository");
-                return Err(err);
+            match self.git_sync().await {
+                Ok(status) => {
+                    if let SyncStatus::Done = self.set_status(|_| status).unwrap() {
+                        return Ok(SyncStatus::Done);
+                    }
+                }
+                Err(err) => {
+                    self.set_status(|_| SyncStatus::Error {
+                        message: err.to_string(),
+                    });
+                    return Err(err);
+                }
             }
         }
 
@@ -164,28 +256,50 @@ impl SyncHandle {
             return Err(SyncError::Cancelled);
         }
 
+        // Can we unwrap here?
+        let repository = repo_pool
+            .read_async(&self.reporef, |_k, v| v.clone())
+            .await
+            .unwrap();
+
+        let tutorial_questions = if !repository.shallow {
+            let db = self.app.sql.clone();
+            let llm_gateway = self.app.user().await.llm_gateway(&self.app).await;
+            let repo_pool = self.app.repo_pool.clone();
+            let reporef = self.reporef.clone();
+
+            Some(tokio::task::spawn(
+                crate::commits::generate_tutorial_questions(db, llm_gateway, repo_pool, reporef),
+            ))
+        } else {
+            None
+        };
+
         let indexed = self.index().await;
         let status = match indexed {
             Ok(Either::Left(status)) => Some(status),
             Ok(Either::Right(state)) => {
                 info!("commit complete; indexing done");
                 self.app.repo_pool.update(&self.reporef, |_k, repo| {
-                    repo.sync_done_with(self.new_branch_filters.as_ref(), state)
+                    repo.sync_done_with(self.shallow, &self.filter_updates, state)
                 });
 
+                if let Some(tutorial_questions) = tutorial_questions {
+                    if let Err(err) = tutorial_questions.await {
+                        error!(?err, "failed to generate tutorial questions");
+                    }
+                }
+
                 // technically `sync_done_with` does this, but we want to send notifications
-                self.set_status(|_| SyncStatus::Done)
+                self.set_status(|repo| repo.sync_status.clone())
             }
             Err(SyncError::Cancelled) => self.set_status(|_| SyncStatus::Cancelled),
-            Err(err) => {
-                error!(?err, ?self.reporef, "failed to index repository");
-                self.set_status(|_| SyncStatus::Error {
-                    message: err.to_string(),
-                })
-            }
+            Err(err) => self.set_status(|_| SyncStatus::Error {
+                message: err.to_string(),
+            }),
         };
 
-        Ok(status.expect("failed to update repo status"))
+        status.ok_or(SyncError::Removed)
     }
 
     async fn index(&self) -> Result<Either<SyncStatus, Arc<RepoMetadata>>> {
@@ -203,8 +317,12 @@ impl SyncHandle {
                 .await
                 .unwrap();
 
-            if let Some(ref bf) = self.new_branch_filters {
-                orig.branch_filter = bf.patch(orig.branch_filter.as_ref());
+            if let Some(ref bf) = self.filter_updates.branch_filter {
+                orig.branch_filter = bf.patch_into(orig.branch_filter.as_ref());
+            }
+
+            if let Some(ref ff) = self.filter_updates.file_filter {
+                orig.file_filter = ff.patch_into(&orig.file_filter);
             }
             orig
         };
@@ -229,7 +347,7 @@ impl SyncHandle {
 
         match indexed {
             Ok(_) => {
-                writers.commit().await.map_err(SyncError::Tantivy)?;
+                writers.commit().map_err(SyncError::Tantivy)?;
                 indexed.map_err(SyncError::Indexing)
             }
             Err(_) if self.pipes.is_removed() => self.delete_repo(&repo, writers).await,
@@ -254,7 +372,7 @@ impl SyncHandle {
 
         let deleted = self.delete_repo_indexes(repo, &writers).await;
         if deleted.is_ok() {
-            writers.commit().await.map_err(SyncError::Tantivy)?;
+            writers.commit().map_err(SyncError::Tantivy)?;
             self.app
                 .config
                 .source
@@ -265,36 +383,102 @@ impl SyncHandle {
         deleted.map(|_| Either::Left(SyncStatus::Removed))
     }
 
-    async fn sync(&self) -> Result<()> {
+    async fn git_sync(&self) -> Result<SyncStatus> {
         let repo = self.reporef.clone();
         let backend = repo.backend();
         let creds = match self.app.credentials.for_repo(&repo) {
             Some(creds) => creds,
             None => {
                 let Some(path) = repo.local_path() else {
-		    return Err(SyncError::NoKeysForBackend(backend));
-		};
+                    return Err(SyncError::NoKeysForBackend(backend));
+                };
 
                 if !self.app.allow_path(&path) {
                     return Err(SyncError::PathNotAllowed(path));
                 }
 
                 // we _never_ touch the git repositories of local repos
-                return Ok(());
+                return Ok(SyncStatus::Queued);
             }
         };
 
-        let synced = creds.sync(self).await;
-        if let Err(RemoteError::RemoteNotFound) = synced {
-            self.set_status(|_| SyncStatus::RemoteRemoved).unwrap();
-            error!(?repo, "remote repository removed; disabling local syncing");
+        let repo = self.sync_lock().await?;
 
-            // we want indexing to pick this up later and handle the new state
-            // all local cleanups are done, so everything should be consistent
-            return Ok(());
-        }
+        // This reads really badly, but essentially we need a way to
+        // retry after cleaning things up, and duplicating _too much_
+        // code.
+        let mut loop_counter = 0;
+        let loop_max = 1;
+        let git_err = loop {
+            match creds.clone_or_pull(self, repo.clone()).await {
+                Err(
+                    err @ RemoteError::GitCloneFetch(gix::clone::fetch::Error::PrepareFetch(
+                        gix::remote::fetch::prepare::Error::RefMap(
+                            gix::remote::ref_map::Error::Handshake(
+                                gix::protocol::handshake::Error::InvalidCredentials { .. },
+                            ),
+                        ),
+                    )),
+                ) => {
+                    error!(?err, ?self.reporef, "invalid credentials for accessing git repo");
+                    return Err(SyncError::Sync(err));
+                }
+                Err(
+                    err @ RemoteError::GitOpen(_)
+                    | err @ RemoteError::GitFetch(_)
+                    | err @ RemoteError::GitPrepareFetch(_)
+                    | err @ RemoteError::GitClone(_)
+                    | err @ RemoteError::GitCloneFetch(_)
+                    | err @ RemoteError::GitConnect(_)
+                    | err @ RemoteError::GitFindRemote(_),
+                ) => {
+                    _ = repo.remove_all().await;
 
-        synced.map_err(SyncError::Sync)
+                    if loop_counter == loop_max {
+                        break err;
+                    }
+
+                    loop_counter += 1;
+                }
+                Err(RemoteError::RemoteNotFound) => {
+                    error!(?repo, "remote repository removed; disabling local syncing");
+
+                    // we want indexing to pick this up later and handle the new state
+                    // all local cleanups are done, so everything should be consistent
+                    return Ok(SyncStatus::RemoteRemoved);
+                }
+                Err(RemoteError::GitHub(
+                    octocrab::Error::Service { .. }
+                    | octocrab::Error::Hyper { .. }
+                    | octocrab::Error::Http { .. },
+                )) => {
+                    warn!("likely network error, skipping further syncing");
+                    return Ok(SyncStatus::Done);
+                }
+                Err(RemoteError::Interrupted) if self.pipes.is_removed() => {
+                    _ = repo.remove_all().await;
+                    return Ok(SyncStatus::Removed);
+                }
+                Err(RemoteError::Interrupted) if self.pipes.is_cancelled() => {
+                    return Ok(SyncStatus::Cancelled);
+                }
+                Err(err) => {
+                    error!(?err, ?self.reporef, "failed to sync repository");
+                    return Err(SyncError::Sync(err));
+                }
+                Ok(status) => {
+                    self.app
+                        .config
+                        .source
+                        .save_pool(self.app.repo_pool.clone())
+                        .expect("filesystem error");
+
+                    return Ok(status);
+                }
+            }
+        };
+
+        Err(SyncError::Sync(git_err))
     }
 
     async fn delete_repo_indexes(
@@ -302,25 +486,19 @@ impl SyncHandle {
         repo: &Repository,
         writers: &indexes::GlobalWriteHandleRef<'_>,
     ) -> Result<()> {
-        let Application {
-            ref semantic,
-            ref sql,
-            ..
-        } = self.app;
+        let Application { ref semantic, .. } = self.app;
 
-        if let Some(semantic) = semantic {
-            semantic
-                .delete_points_for_hash(&self.reporef.to_string(), std::iter::empty())
-                .await;
-        }
+        semantic
+            .delete_points_for_hash(&self.reporef.to_string(), std::iter::empty())
+            .await;
 
-        FileCache::for_repo(sql, &self.reporef)
-            .delete()
+        self.file_cache
+            .delete(&self.reporef)
             .await
             .map_err(SyncError::Sql)?;
 
         if !self.reporef.is_local() {
-            tokio::fs::remove_dir_all(&repo.disk_path)
+            repo.remove_all()
                 .await
                 .map_err(|e| SyncError::RemoveLocal(repo.disk_path.clone(), e))?;
         }
@@ -332,51 +510,64 @@ impl SyncHandle {
         Ok(())
     }
 
-    pub(crate) fn pipes(&self) -> &SyncPipes {
-        &self.pipes
-    }
-
-    pub(crate) fn repo(&self) -> Option<Repository> {
-        self.app
-            .repo_pool
-            .read(&self.reporef, |_k, repo| repo.clone())
-    }
-
     pub(crate) fn set_status(
         &self,
         updater: impl FnOnce(&Repository) -> SyncStatus,
     ) -> Option<SyncStatus> {
         let new_status = self.app.repo_pool.update(&self.reporef, move |_k, repo| {
-            repo.sync_status = (updater)(repo);
+            let new_status = (updater)(repo);
+            let old_status = std::mem::replace(&mut repo.sync_status, new_status);
+
+            if !matches!(repo.sync_status, SyncStatus::Queued)
+                || matches!(old_status, SyncStatus::Syncing)
+            {
+                repo.pub_sync_status = repo.sync_status.clone();
+            }
+
+            if matches!(
+                repo.sync_status,
+                SyncStatus::Error { .. } | SyncStatus::Done
+            ) {
+                repo.locked = false;
+            }
+
             repo.sync_status.clone()
         })?;
 
-        debug!(?self.reporef, ?new_status, "new status");
-        self.pipes.status(new_status.clone());
+        if let SyncStatus::Error { ref message } = new_status {
+            error!(?self.reporef, err=?message, "indexing failed");
+        } else {
+            debug!(?self.reporef, ?new_status, "new status");
+        }
+
+        if !matches!(new_status, SyncStatus::Queued) {
+            self.pipes.status(new_status.clone());
+        }
         Some(new_status)
     }
 
-    pub(crate) async fn sync_lock(&self) -> std::result::Result<Repository, RemoteError> {
+    async fn sync_lock(&self) -> std::result::Result<Repository, SyncError> {
         let repo = self
             .app
             .repo_pool
             .update_async(&self.reporef, |_k, repo| {
-                if repo.sync_status == SyncStatus::Syncing {
-                    Err(RemoteError::SyncInProgress)
+                if repo.lock().is_err() {
+                    Err(SyncError::SyncInProgress)
                 } else {
-                    repo.sync_status = SyncStatus::Syncing;
                     Ok(repo.clone())
                 }
             })
             .await;
 
-        if let Some(Ok(repo)) = repo {
-            let new_status = repo.sync_status.clone();
-            debug!(?self.reporef, ?new_status, "new status");
-            self.pipes.status(new_status);
-            Ok(repo)
-        } else {
-            repo.expect("repo was already deleted")
+        match repo {
+            Some(Ok(repo)) => {
+                let new_status = repo.sync_status.clone();
+                debug!(?self.reporef, ?new_status, "new status");
+                self.pipes.status(new_status);
+                Ok(repo)
+            }
+            Some(err) => err,
+            None => Err(SyncError::Removed),
         }
     }
 }

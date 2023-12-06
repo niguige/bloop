@@ -13,11 +13,11 @@ import SymbolIcon from '../../CodeSymbolIcon';
 import { SymbolType } from '../../../types/results';
 import { Commit } from '../../../types';
 import { markNode, unmark } from '../../../utils/textSearch';
-import { propsAreShallowEqual } from '../../../utils';
 
 type Props = {
   lineNumber: number;
   lineNumberToShow?: number | null;
+  lineNumbersDiff?: [number | null, number | null] | null;
   children: ReactNode;
   showLineNumbers?: boolean;
   lineFoldable?: boolean;
@@ -40,6 +40,7 @@ type Props = {
   highlightColor?: string | null;
   leftHighlight?: boolean;
   removePaddings?: boolean;
+  hoveredBackground?: boolean;
 };
 
 const CodeLine = ({
@@ -63,6 +64,8 @@ const CodeLine = ({
   lineNumberToShow = lineNumber + 1,
   leftHighlight,
   removePaddings,
+  hoveredBackground,
+  lineNumbersDiff,
 }: Props) => {
   const codeRef = useRef<HTMLTableCellElement>(null);
 
@@ -161,10 +164,12 @@ const CodeLine = ({
 
   return (
     <div
-      className={`flex transition-all duration-150 ease-in-bounce group hover:bg-transparent ${
+      className={`flex w-full flex-1 transition-all duration-150 ease-in-bounce group ${
         lineHidden ? 'opacity-0' : ''
       } ${
         blameLine?.start && lineNumber !== 0 ? ' border-t border-bg-border' : ''
+      } ${hoveredBackground ? 'bg-bg-base' : ''} ${
+        isNewLine ? 'bg-bg-success/30' : isRemovedLine ? 'bg-bg-danger/30' : ''
       }`}
       data-line-number={lineNumber}
       style={style}
@@ -209,38 +214,44 @@ const CodeLine = ({
             )}
           </span>
         </div>
-      ) : (
-        <div
-          className={`${
-            showLineNumbers && !removePaddings ? 'px-1' : ''
-          } text-center ${lineHidden ? 'p-0' : ''} ${
-            isRemovedLine
-              ? 'bg-bg-danger/30'
-              : isNewLine
-              ? 'bg-bg-success/30'
-              : ''
-          }`}
-        />
-      )}
-      {showLineNumbers && (
-        <div
-          data-line={lineNumberToShow}
-          className={`min-w-[27px] text-right select-none pr-0 leading-5 ${blameStyle} ${
-            lineHidden ? 'p-0' : ''
-          } ${hoverEffect ? 'group-hover:text-label-base' : ''}
+      ) : null}
+      {showLineNumbers &&
+        (lineNumbersDiff ? (
+          lineNumbersDiff.map((ln, i) => (
+            <div
+              key={i}
+              data-line={ln}
+              className={`min-w-[27px] text-right select-none pr-0 leading-5 ${blameStyle} ${
+                lineHidden ? 'p-0' : ''
+              } ${hoverEffect ? 'group-hover:text-label-base' : ''}
+           ${lineHidden ? '' : 'before:content-[attr(data-line)]'} ${
+             isRemovedLine
+               ? 'text-label-base'
+               : isNewLine
+               ? 'text-label-base'
+               : 'text-label-muted'
+           }`}
+            />
+          ))
+        ) : (
+          <div
+            data-line={lineNumberToShow}
+            className={`min-w-[27px] text-right select-none pr-0 leading-5 ${blameStyle} ${
+              lineHidden ? 'p-0' : ''
+            } ${hoverEffect ? 'group-hover:text-label-base' : ''}
            ${
              lineHidden || !lineNumberToShow
                ? ''
                : 'before:content-[attr(data-line)]'
            } ${
              isRemovedLine
-               ? 'bg-bg-danger/30 text-label-base'
+               ? 'text-label-base'
                : isNewLine
-               ? 'bg-bg-success/30 text-label-base'
+               ? 'text-label-base'
                : 'text-label-muted'
            }`}
-        />
-      )}
+          />
+        ))}
       <div
         className={`text-label-muted ${lineHidden ? 'p-0' : ''} ${blameStyle}`}
       >
@@ -257,19 +268,12 @@ const CodeLine = ({
       <div
         className={`${showLineNumbers ? 'pl-2' : ''} ${
           lineHidden ? 'p-0' : ''
-        }`}
+        } flex-1`}
         ref={codeRef}
-        style={
-          isNewLine
-            ? { backgroundColor: 'rgba(var(--bg-success), 0.3)' }
-            : isRemovedLine
-            ? { backgroundColor: 'rgba(var(--bg-danger), 0.3)' }
-            : {}
-        }
       >
         {children}
       </div>
     </div>
   );
 };
-export default memo(CodeLine, propsAreShallowEqual);
+export default memo(CodeLine);

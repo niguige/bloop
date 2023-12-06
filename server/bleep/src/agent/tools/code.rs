@@ -1,6 +1,5 @@
 use anyhow::Result;
-use futures::TryStreamExt;
-use tracing::info;
+use tracing::{debug, info, instrument, trace};
 
 use crate::{
     agent::{
@@ -12,8 +11,11 @@ use crate::{
 };
 
 impl Agent {
+    #[instrument(skip(self))]
     pub async fn code_search(&mut self, query: &String) -> Result<String> {
         const CODE_SEARCH_LIMIT: u64 = 10;
+        const MINIMUM_RESULTS: usize = CODE_SEARCH_LIMIT as usize / 2;
+
         self.update(Update::StartStep(SearchStep::Code {
             query: query.clone(),
             response: String::new(),
@@ -21,19 +23,30 @@ impl Agent {
         .await?;
 
         let mut results = self
-            .semantic_search(query.into(), CODE_SEARCH_LIMIT, 0, 0.0, true)
+            .semantic_search(query.into(), vec![], CODE_SEARCH_LIMIT, 0, 0.3, true)
             .await?;
 
-        let hyde_docs = self.hyde(query).await?;
-        if !hyde_docs.is_empty() {
-            let hyde_doc = hyde_docs.first().unwrap().into();
-            let hyde_results = self
-                .semantic_search(hyde_doc, CODE_SEARCH_LIMIT, 0, 0.3, true)
-                .await?;
-            results.extend(hyde_results);
-        }
+        debug!("returned {} results", results.len());
 
-        let chunks = results
+        let hyde_docs = if results.len() < MINIMUM_RESULTS {
+            info!("too few results returned, running HyDE");
+
+            let hyde_docs = self.hyde(query).await?;
+            if !hyde_docs.is_empty() {
+                let hyde_doc = hyde_docs.first().unwrap().into();
+                let hyde_results = self
+                    .semantic_search(hyde_doc, vec![], CODE_SEARCH_LIMIT, 0, 0.3, true)
+                    .await?;
+
+                debug!("returned {} HyDE results", results.len());
+                results.extend(hyde_results);
+            }
+            hyde_docs
+        } else {
+            vec![]
+        };
+
+        let mut chunks = results
             .into_iter()
             .map(|chunk| {
                 let relative_path = chunk.relative_path;
@@ -42,11 +55,13 @@ impl Agent {
                     path: relative_path.clone(),
                     alias: self.get_path_alias(&relative_path),
                     snippet: chunk.text,
-                    start_line: (chunk.start_line as usize).saturating_add(1),
-                    end_line: (chunk.end_line as usize).saturating_add(1),
+                    start_line: chunk.start_line as usize,
+                    end_line: chunk.end_line as usize,
                 }
             })
             .collect::<Vec<_>>();
+
+        chunks.sort_by(|a, b| a.alias.cmp(&b.alias).then(a.start_line.cmp(&b.start_line)));
 
         for chunk in chunks.iter().filter(|c| !c.is_empty()) {
             self.exchanges
@@ -89,18 +104,17 @@ impl Agent {
             &prompts::hypothetical_document_prompt(query),
         )];
 
-        tracing::trace!(?query, "generating hyde docs");
+        trace!(?query, "generating hyde docs");
 
         let response = self
             .llm_gateway
             .clone()
             .model("gpt-3.5-turbo-0613")
+            .temperature(0.0)
             .chat(&prompt, None)
-            .await?
-            .try_collect::<String>()
             .await?;
 
-        tracing::trace!("parsing hyde response");
+        trace!("parsing hyde response");
 
         let documents = prompts::try_parse_hypothetical_documents(&response);
 

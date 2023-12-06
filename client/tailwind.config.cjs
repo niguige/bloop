@@ -15,9 +15,14 @@ module.exports = {
         "bg-border": "rgb(var(--bg-border))",
         "bg-border-hover": "rgb(var(--bg-border-hover))",
         "bg-main": "rgb(var(--bg-main))",
+        "bg-main/8": "rgba(var(--bg-main), 0.08)",
+        "bg-main/12": "rgba(var(--bg-main), 0.12)",
+        "bg-main/15": "rgba(var(--bg-main), 0.15)",
+        "bg-main/30": "rgba(var(--bg-main), 0.3)",
         "bg-main-hover": "rgb(var(--bg-main-hover))",
         "bg-danger": "rgb(var(--bg-danger))",
         "bg-danger/30": "rgba(var(--bg-danger), 0.3)",
+        "bg-danger/12": "rgba(var(--bg-danger), 0.12)",
         "bg-danger-hover": "rgb(var(--bg-danger-hover))",
         "bg-success": "rgb(var(--bg-success))",
         "bg-success/30": "rgba(var(--bg-success), 0.3)",
@@ -25,10 +30,13 @@ module.exports = {
         "label-control": "rgb(var(--label-control))",
         "label-faint": "rgb(var(--label-faint))",
         "label-muted": "rgb(var(--label-muted))",
+        "label-muted/15": "rgba(var(--label-muted), 0.15)",
         "label-base": "rgb(var(--label-base))",
         "label-title": "rgb(var(--label-title))",
+        "label-title/15": "rgba(var(--label-title), 0.15)",
         "label-link": "rgb(var(--label-link))",
         "chat-bg-base": "rgb(var(--chat-bg-base))",
+        "chat-bg-base/25": "rgba(var(--chat-bg-base), 0.25)",
         "chat-bg-base/35": "rgba(var(--chat-bg-base), 0.35)",
         "chat-bg-base/50": "rgba(var(--chat-bg-base), 0.5)",
         "chat-bg-base/75": "rgba(var(--chat-bg-base), 0.75)",
@@ -42,10 +50,13 @@ module.exports = {
         "bg-highlight": "rgb(var(--bg-highlight))",
         "bg-highlight/25": "rgba(var(--bg-highlight), 0.25)",
         "danger-300": "#FB7185",
+        "warning-100": "#F0A892",
+        "warning-300": "#ED6E47",
         sky: '#0EA4E9',
         violet: '#8B5CF6',
         pink: '#EC4899',
         orange: '#F78166',
+        'orange-600': '#E9694C',
         yellow: "#EAB408",
         purple: "#652D90",
       },
@@ -56,6 +67,9 @@ module.exports = {
         low: 'var(--shadow-low)',
         "rings-gray": "var(--shadow-rings-gray",
         "rings-blue": "var(--shadow-rings-blue)",
+      },
+      dropShadow: {
+        float: "0px 16px 34px rgba(0, 0, 0, 0.75)",
       },
       spacing: {
         "4.5": "1.125rem",
@@ -76,6 +90,7 @@ module.exports = {
         'px': '1px',
         1: "0.075rem",
         4: "0.25rem",
+        6: "6px",
         14: "0.875rem"
       },
       padding: {
@@ -118,6 +133,7 @@ module.exports = {
         'md': "6px"
       },
       backgroundImage: {
+        "studio": "linear-gradient(135deg, #C7363E 0%, #C7369E 100%)",
         skeleton: 'linear-gradient(90deg, rgba(var(--bg-base-hover), .1) 0%, rgba(var(--bg-base-hover), .1) 33%, rgb(var(--bg-base-hover)) 60%, rgba(var(--bg-base-hover), .1) 100%)',
       },
       backgroundSize :{
@@ -131,6 +147,9 @@ module.exports = {
         100: 100,
       },
       animation: {
+        'pulse-slow': 'pulse 5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'opacity-slow': 'opacity 5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'pulse-shadow-slow': 'shadow 5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'spin-slow': 'spin 1.5s linear infinite',
         'spin-extra-slow': 'spin 2s linear infinite',
         'move-x': 'move-x 2.5s linear infinite',
@@ -142,6 +161,28 @@ module.exports = {
         'loader-state-three': 'loader-state-three 0.55s cubic-bezier(.5,.0,1,.5)',
       },
       keyframes: {
+        shadow: {
+          '0%': {
+            boxShadow: 'var(--shadow-float)',
+          },
+          '50%': {
+            boxShadow: 'var(--shadow-low)',
+          },
+          '100%': {
+            boxShadow: 'var(--shadow-float)',
+          },
+        },
+        opacity: {
+          '0%': {
+            opacity: 0,
+          },
+          '50%': {
+            opacity: 1,
+          },
+          '100%': {
+            opacity: 0,
+          },
+        },
         'move-x': {
           '0%': {
             transform: 'translateX(-75%)',
@@ -196,6 +237,6 @@ module.exports = {
     namedGroups: ["tooltip","summary"],
   },
   plugins: [
-    require('tailwindcss-labeled-groups')(['custom', 'summary' , 'code'])
+    require('tailwindcss-labeled-groups')(['custom', 'summary' , 'code' ,'row'])
   ],
 };

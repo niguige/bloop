@@ -1,8 +1,6 @@
 use anyhow::Context;
-use regex::RegexSet;
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
-    collections::BTreeSet,
     fmt::{self, Display},
     path::{Path, PathBuf},
     str::FromStr,
@@ -15,6 +13,12 @@ use crate::state::get_relative_path;
 
 pub(crate) mod iterator;
 use iterator::language;
+
+pub use iterator::{BranchFilter, BranchFilterConfig, FileFilter, FileFilterConfig, FilterUpdate};
+
+#[derive(thiserror::Error, Debug)]
+#[error("repository locked")]
+pub struct RepoLocked;
 
 // Types of repo
 #[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Clone, Debug)]
@@ -186,56 +190,50 @@ impl<'de> Deserialize<'de> for RepoRef {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum BranchFilter {
-    All,
-    Head,
-    Select(Vec<String>),
-}
-
-impl BranchFilter {
-    pub(crate) fn patch(&self, old: Option<&BranchFilter>) -> Option<BranchFilter> {
-        let Some(BranchFilter::Select(ref old_list)) = old
-        else {
-	    return Some(self.clone());
-	};
-
-        let BranchFilter::Select(new_list) = self
-        else {
-	    return Some(self.clone());
-	};
-
-        let mut updated = old_list.iter().collect::<BTreeSet<_>>();
-        updated.extend(new_list);
-
-        Some(BranchFilter::Select(updated.into_iter().cloned().collect()))
-    }
-}
-
-impl From<&BranchFilter> for iterator::BranchFilter {
-    fn from(value: &BranchFilter) -> Self {
-        match value {
-            BranchFilter::All => iterator::BranchFilter::All,
-            BranchFilter::Head => iterator::BranchFilter::Head,
-            BranchFilter::Select(regexes) => {
-                let mut regexes = regexes.clone();
-                regexes.push("HEAD".into());
-                iterator::BranchFilter::Select(RegexSet::new(regexes).unwrap())
-            }
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Repository {
+    /// Path to the physical location of the repo root
     pub disk_path: PathBuf,
+
+    /// Configuration of the remote to sync with
     pub remote: RepoRemote,
+
+    /// Current user-readable status of syncing
     pub sync_status: SyncStatus,
-    pub last_commit_unix_secs: u64,
+
+    /// Time of last commit at the last successful index
+    pub last_commit_unix_secs: i64,
+
+    /// Time of last successful index
     pub last_index_unix_secs: u64,
+
+    /// Most common language
     pub most_common_lang: Option<String>,
-    pub branch_filter: Option<BranchFilter>,
+
+    /// Filters which branches to index
+    pub branch_filter: Option<BranchFilterConfig>,
+
+    /// Custom file filter overrides
+    #[serde(default)]
+    pub file_filter: FileFilterConfig,
+
+    /// Indicate that this repository is to be cloned as a shallow copy
+    ///
+    /// Defaults to `false for existing repos.
+    ///
+    /// This is a set-once value, meaning there's no meaningful
+    /// reversal of a `false` value to `true`, but `true` to `false`
+    /// is ok.
+    #[serde(default)]
+    pub shallow: bool,
+
+    /// Sync lock
+    #[serde(skip)]
+    pub locked: bool,
+
+    /// Current user-readable status of syncing
+    #[serde(skip)]
+    pub pub_sync_status: SyncStatus,
 }
 
 impl Repository {
@@ -268,12 +266,25 @@ impl Repository {
 
         Self {
             sync_status: SyncStatus::Queued,
+            pub_sync_status: SyncStatus::Queued,
             last_index_unix_secs: 0,
             last_commit_unix_secs: 0,
-            disk_path,
-            remote,
             most_common_lang: None,
             branch_filter: None,
+            file_filter: Default::default(),
+            locked: false,
+            shallow: false,
+            disk_path,
+            remote,
+        }
+    }
+
+    /// Delete the on-disk data for this repository asynchronously.
+    pub async fn remove_all(&self) -> Result<(), std::io::Error> {
+        if self.disk_path.exists() {
+            tokio::fs::remove_dir_all(&self.disk_path).await
+        } else {
+            Ok(())
         }
     }
 
@@ -298,6 +309,7 @@ impl Repository {
     /// Does not initiate a new sync.
     pub(crate) fn mark_removed(&mut self) {
         self.sync_status = SyncStatus::Removed;
+        self.pub_sync_status = SyncStatus::Removed;
     }
 
     /// Marks the repository for indexing on the next sync
@@ -306,9 +318,23 @@ impl Repository {
         self.sync_status = SyncStatus::Queued;
     }
 
+    /// Locks the repository or returns with an error if already locked.
+    ///
+    /// The returned error helps track conflicting sync processes, and
+    /// avoids ambiguity about the lifecycle the repository's in.
+    pub(crate) fn lock(&mut self) -> Result<(), RepoLocked> {
+        if self.locked {
+            Err(RepoLocked)
+        } else {
+            self.locked = true;
+            Ok(())
+        }
+    }
+
     pub(crate) fn sync_done_with(
         &mut self,
-        new_branch_filters: Option<&BranchFilter>,
+        shallow: bool,
+        filter_update: &FilterUpdate,
         metadata: Arc<RepoMetadata>,
     ) {
         self.last_index_unix_secs = get_unix_time(SystemTime::now());
@@ -319,11 +345,22 @@ impl Repository {
             .map(|l| l.to_string())
             .or_else(|| self.most_common_lang.take());
 
-        if let Some(bf) = new_branch_filters {
-            self.branch_filter = bf.patch(self.branch_filter.as_ref());
+        if let Some(ref bf) = filter_update.branch_filter {
+            self.branch_filter = bf.patch_into(self.branch_filter.as_ref());
         }
 
-        self.sync_status = SyncStatus::Done;
+        self.shallow = shallow;
+        self.locked = false;
+
+        if shallow {
+            self.sync_status = SyncStatus::Shallow
+        } else {
+            if let Some(ref ff) = filter_update.file_filter {
+                self.file_filter = ff.patch_into(&self.file_filter);
+            }
+
+            self.sync_status = SyncStatus::Done
+        };
     }
 }
 
@@ -335,11 +372,11 @@ fn get_unix_time(time: SystemTime) -> u64 {
 
 #[derive(Debug)]
 pub struct RepoMetadata {
-    pub last_commit_unix_secs: Option<u64>,
+    pub last_commit_unix_secs: Option<i64>,
     pub langs: language::LanguageInfo,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStatus {
     /// There was an error during last sync & index
@@ -358,9 +395,10 @@ pub enum SyncStatus {
     Cancelled,
 
     /// Queued for sync & index
+    #[default]
     Queued,
 
-    /// Active VCS operation in progress
+    /// Active Git clone in progress (we don't report fetch/pull)
     Syncing,
 
     /// Active indexing in progress
@@ -368,6 +406,10 @@ pub enum SyncStatus {
 
     /// VCS remote has been removed
     RemoteRemoved,
+
+    /// There's a clone, but only usable for directory listings
+    /// through a dedicated API based on Git
+    Shallow,
 
     /// Successfully indexed
     Done,

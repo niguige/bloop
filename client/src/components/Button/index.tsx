@@ -17,7 +17,8 @@ type Props = {
     | 'tertiary'
     | 'tertiary-outlined'
     | 'tertiary-disabled'
-    | 'tertiary-active';
+    | 'tertiary-active'
+    | 'danger';
   size?: 'tiny' | 'small' | 'medium' | 'large';
   className?: string;
 } & (OnlyIconProps | TextBtnProps);
@@ -31,13 +32,14 @@ type OnlyIconProps = {
 type TextBtnProps = {
   onlyIcon?: false;
   tooltipPlacement?: never;
+  title?: string;
 };
 
 const variantStylesMap = {
   primary:
-    'text-label-control bg-bg-main hover:bg-bg-main-hover focus:bg-bg-main-hover active:bg-bg-main active:shadow-rings-blue disabled:bg-bg-base disabled:text-label-muted disabled:hover:border-none disabled:hover:bg-bg-base disabled:active:shadow-none disabled:border-none',
+    'text-label-control bg-bg-main hover:bg-bg-main-hover focus:bg-bg-main-hover active:bg-bg-main active:shadow-rings-blue focus:shadow-rings-blue disabled:bg-bg-base disabled:text-label-muted disabled:hover:border-none disabled:hover:bg-bg-base disabled:active:shadow-none disabled:border-none',
   secondary:
-    'text-label-title bg-bg-base border border-bg-border hover:border-bg-border-hover hover:bg-bg-base-hover focus:border-bg-border-hover active:bg-bg-base disabled:bg-bg-base disabled:border-none disabled:text-label-muted shadow-low hover:shadow-none focus:shadow-none active:shadow-rings-gray disabled:shadow-none',
+    'text-label-title bg-bg-base border border-bg-border hover:border-bg-border-hover focus:border-bg-border-hover hover:bg-bg-base-hover focus:bg-bg-base-hover active:bg-bg-base disabled:bg-bg-base disabled:border-none disabled:text-label-muted shadow-low hover:shadow-none focus:shadow-none active:shadow-rings-gray disabled:shadow-none',
   tertiary:
     'text-label-muted bg-transparent hover:text-label-title focus:text-label-title hover:bg-bg-base-hover focus:bg-bg-base-hover active:text-label-title active:bg-transparent disabled:bg-bg-base disabled:text-label-muted',
   'tertiary-active': 'text-label-title bg-bg-base-hover',
@@ -45,11 +47,13 @@ const variantStylesMap = {
     'text-label-muted bg-transparent border border-bg-border hover:bg-bg-base-hover focus:bg-bg-base-hover active:bg-transparent hover:text-label-title focus:text-label-title active:text-label-title disabled:bg-bg-base disabled:text-label-muted disabled:border-transparent disabled:hover:border-transparent',
   'tertiary-disabled':
     'text-label-muted bg-transparent hover:text-label-title focus:text-label-title hover:bg-bg-base-hover focus:bg-bg-base-hover active:text-label-title active:bg-transparent disabled:opacity-50 disabled:text-label-muted disabled:hover:text-label-muted disabled:hover:bg-transparent',
+  danger:
+    'text-label-control bg-bg-danger hover:bg-bg-danger-hover focus:bg-bg-danger-hover active:bg-bg-danger active:shadow-low disabled:bg-bg-base disabled:text-label-muted disabled:hover:border-none disabled:hover:bg-bg-base disabled:active:shadow-none disabled:border-none',
 };
 
 const sizeMap = {
   tiny: {
-    default: 'h-6 px-1 gap-1 caption-strong min-w-[64px] ',
+    default: 'h-6 px-1 gap-1 caption-strong',
     square: 'h-6 w-6 justify-center p-0',
   },
   small: {
@@ -102,7 +106,7 @@ const Button = forwardRef<
         } transition-all duration-300 ease-in-bounce select-none`,
       [variant, className, size, onlyIcon],
     );
-    return onlyIcon && !rest.disabled ? (
+    return (onlyIcon && !rest.disabled) || title ? (
       <Tooltip text={title} placement={tooltipPlacement}>
         <button {...rest} type={type} ref={ref} className={buttonClassName}>
           {children}

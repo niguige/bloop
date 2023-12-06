@@ -1,7 +1,8 @@
 use crate::query::parser::SemanticQuery;
-use std::{fmt, mem};
+use std::fmt;
 
 use chrono::prelude::{DateTime, Utc};
+use rand::seq::SliceRandom;
 
 /// A continually updated conversation exchange.
 ///
@@ -62,6 +63,23 @@ impl Exchange {
                 self.response_timestamp = Some(Utc::now());
                 self.conclusion = Some(conclusion);
             }
+            Update::Focus(chunk) => {
+                self.focused_chunk = Some(chunk);
+            }
+            Update::Cancel => {
+                let conclusion = [
+                    "The article wasn't completed. See what's available",
+                    "Your article stopped before completion. Check out the available content",
+                    "The content stopped generating early. Review the initial response",
+                ]
+                .choose(&mut rand::thread_rng())
+                .copied()
+                .unwrap()
+                .to_owned();
+
+                self.conclusion = Some(conclusion);
+                self.response_timestamp = Some(Utc::now());
+            }
         }
     }
 
@@ -74,8 +92,8 @@ impl Exchange {
     ///
     /// This returns a tuple of `(full_text, conclusion)`.
     pub fn answer(&self) -> Option<(&str, &str)> {
-        match (&self.conclusion, &self.answer) {
-            (Some(conclusion), Some(answer)) => Some((conclusion.as_str(), answer.as_str())),
+        match (&self.answer, &self.conclusion) {
+            (Some(answer), Some(conclusion)) => Some((answer.as_str(), conclusion.as_str())),
             _ => None,
         }
     }
@@ -84,17 +102,16 @@ impl Exchange {
     ///
     /// This is used to reduce the size of an exchange when we send it over the wire, by removing
     /// data that the front-end does not use.
-    pub fn compressed(&self) -> Self {
-        let mut ex = self.clone();
-
-        ex.code_chunks.clear();
-        ex.paths.clear();
-        ex.search_steps = mem::take(&mut ex.search_steps)
+    pub fn compressed(mut self) -> Self {
+        self.code_chunks.clear();
+        self.paths.clear();
+        self.search_steps = self
+            .search_steps
             .into_iter()
             .map(|step| step.compressed())
             .collect();
 
-        ex
+        self
     }
 }
 
@@ -187,4 +204,6 @@ pub enum Update {
     ReplaceStep(SearchStep),
     Article(String),
     Conclude(String),
+    Focus(FocusedChunk),
+    Cancel,
 }

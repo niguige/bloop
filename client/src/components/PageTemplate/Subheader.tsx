@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useMemo } from 'react';
+import React, { memo, useCallback, useContext, useMemo } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import findLastIndex from 'lodash.findlastindex';
 import SearchInput from '../SearchInput';
@@ -21,6 +21,7 @@ import { DropdownWithIcon } from '../Dropdown';
 import { ContextMenuItem } from '../ContextMenu';
 import { MenuItemType } from '../../types/general';
 import useKeyboardNavigation from '../../hooks/useKeyboardNavigation';
+import { isFocusInInput } from '../../utils/domUtils';
 import BranchSelector from './BranchSelector';
 import RepoHomeBtn from './RepoHomeBtn';
 import Separator from './Separator';
@@ -35,11 +36,7 @@ const Subheader = () => {
   } = useContext(AppNavigationContext);
 
   const resultsBackIndex = useMemo(() => {
-    const index = findLastIndex(
-      navigationHistory,
-      (item) =>
-        item.type === 'conversation-result' || item.type === 'article-response',
-    );
+    const index = findLastIndex(navigationHistory, (item) => !!item.threadId);
     if (index < 0) {
       return 0;
     }
@@ -134,15 +131,6 @@ const Subheader = () => {
         } else {
           resultsInList = false;
         }
-        if (i?.navType !== 'results' && i?.navType !== 'search') {
-          // is part of path to file and not ref/def and not before ref/def
-          if (pathToFileInList && !i?.navType && !array[index - 1]?.navType) {
-            return false; // remove clusters of navigation items
-          }
-          pathToFileInList = true;
-        } else {
-          pathToFileInList = false;
-        }
         return !!i;
       })
       .reverse()
@@ -152,7 +140,7 @@ const Subheader = () => {
 
   const handleKeyEvent = useCallback(
     (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey) {
+      if ((e.metaKey || e.ctrlKey) && !isFocusInInput()) {
         if (e.key === 'ArrowLeft' && navigationHistory.length > 1) {
           e.preventDefault();
           navigateBack('auto');
@@ -229,4 +217,4 @@ const Subheader = () => {
   );
 };
 
-export default Subheader;
+export default memo(Subheader);

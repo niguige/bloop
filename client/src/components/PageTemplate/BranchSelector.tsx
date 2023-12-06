@@ -12,7 +12,7 @@ import { UIContext } from '../../context/uiContext';
 import TextInput from '../TextInput';
 import { RepoType, SyncStatus } from '../../types/general';
 import { DeviceContext } from '../../context/deviceContext';
-import CloudFeaturePopup from '../CloudFeaturePopup';
+import { PersonalQuotaContext } from '../../context/personalQuotaContext';
 import BranchItem from './BranchItem';
 
 let eventSource: EventSource;
@@ -21,7 +21,6 @@ const BranchSelector = () => {
   const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const [isOpen, setOpen] = useState(false);
-  const [isPopupOpen, setPopupOpen] = useState(false);
   const [indexing, setIndexing] = useState({ branch: '', percentage: 0 });
   const [branchesToSync, setBranchesToSync] = useState<string[]>([]);
   const contextMenuRef = useRef<HTMLDivElement>(null);
@@ -29,22 +28,24 @@ const BranchSelector = () => {
 
   const { apiUrl, isSelfServe } = useContext(DeviceContext);
   const { tab } = useContext(UIContext.Tab);
+  const { isSubscribed } = useContext(PersonalQuotaContext.Values);
   const { repositories, setRepositories } = useContext(RepositoriesContext);
   const { selectedBranch, setSelectedBranch } = useContext(
     SearchContext.SelectedBranch,
   );
+  const { setCloudFeaturePopupOpen } = useContext(UIContext.CloudFeaturePopup);
 
   const currentRepo = useMemo(() => {
-    return repositories?.find((r) => r.ref === tab.key);
-  }, [repositories, tab.key]);
+    return repositories?.find((r) => r.ref === tab.repoRef);
+  }, [repositories, tab.repoRef]);
 
   const allBranches = useMemo(() => {
     return [...(currentRepo?.branches || [])].reverse();
-  }, [currentRepo, tab.key]);
+  }, [currentRepo, tab.repoRef]);
 
   const indexedBranches = useMemo(() => {
     return currentRepo?.branch_filter?.select || [];
-  }, [currentRepo, tab.key]);
+  }, [currentRepo, tab.repoRef]);
 
   const branchesToShow = useMemo(() => {
     return indexedBranches
@@ -67,7 +68,7 @@ const BranchSelector = () => {
     eventSource.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        if (data.ref !== tab.key) {
+        if (data.ref !== tab.repoRef) {
           return;
         }
         if (data.ev?.status_change) {
@@ -106,7 +107,7 @@ const BranchSelector = () => {
           });
         }
         if (data.ev?.index_percent) {
-          setIndexing((prev) => ({
+          setIndexing(() => ({
             branch: data.b?.select[0],
             percentage: data.ev?.index_percent || 1,
           }));
@@ -119,7 +120,7 @@ const BranchSelector = () => {
     return () => {
       eventSource?.close();
     };
-  }, [tab.key]);
+  }, [tab.repoRef]);
 
   const items = useMemo(() => {
     return branchesToShow
@@ -131,7 +132,7 @@ const BranchSelector = () => {
           selectedBranch={selectedBranch}
           setSelectedBranch={setSelectedBranch}
           setOpen={setOpen}
-          repoRef={tab.key}
+          repoRef={tab.repoRef}
           isIndexed={indexedBranches.includes(itemName)}
           isIndexing={indexing.branch === itemName}
           percentage={indexing.percentage}
@@ -143,10 +144,6 @@ const BranchSelector = () => {
 
   return allBranches.length > 1 ? (
     <div ref={contextMenuRef} className="max-w-full">
-      <CloudFeaturePopup
-        isOpen={isPopupOpen}
-        onClose={() => setPopupOpen(false)}
-      />
       <Tippy
         onHide={() => setOpen(false)}
         visible={isOpen}
@@ -196,10 +193,10 @@ const BranchSelector = () => {
           size="medium"
           type="button"
           onClick={() => {
-            if (isSelfServe) {
+            if (isSelfServe || isSubscribed) {
               setOpen((prev) => !prev);
             } else {
-              setPopupOpen(true);
+              setCloudFeaturePopupOpen(true);
             }
           }}
           className="ellipsis"

@@ -1,12 +1,16 @@
-use crate::{semantic::chunk::OverlapStrategy, state::StateSource};
+use crate::state::StateSource;
 use anyhow::{Context, Result};
 use clap::Parser;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, Serializer};
-use std::path::{Path, PathBuf};
+use std::{
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
+use uuid::Uuid;
 
-#[derive(Serialize, Deserialize, Parser, Debug)]
+#[derive(Serialize, Deserialize, Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Configuration {
     //
@@ -108,9 +112,10 @@ pub struct Configuration {
     //
     // Semantic values
     //
-    #[clap(long)]
+    #[clap(long, default_value_t = default_qdrant_url())]
+    #[serde(default = "default_qdrant_url")]
     /// URL for the qdrant server
-    pub qdrant_url: Option<String>,
+    pub qdrant_url: String,
 
     #[clap(long, default_value_os_t = default_model_dir())]
     #[serde(default = "default_model_dir")]
@@ -122,34 +127,49 @@ pub struct Configuration {
     /// Maximum number of tokens in a chunk (should be the model's input size)
     pub max_chunk_tokens: usize,
 
-    #[clap(long)]
-    /// Chunking strategy
-    pub overlap: Option<OverlapStrategy>,
+    #[clap(long, default_value_t = default_collection_name())]
+    #[serde(default = "default_collection_name")]
+    /// Qdrant collection name. Defaults to `documents`
+    pub collection_name: String,
+
+    #[clap(long, default_value_t = interactive_batch_size())]
+    #[serde(default = "interactive_batch_size")]
+    /// Batch size for batched embeddings
+    pub embedding_batch_size: NonZeroUsize,
 
     //
-    // Installation-specific values
+    // Cognito setup
     //
+    /// Cognito userpool_id
     #[clap(long)]
-    #[serde(serialize_with = "serialize_secret_opt_str", default)]
-    /// Github Client ID for either OAuth or GitHub Apps
-    pub github_client_id: Option<SecretString>,
+    pub cognito_userpool_id: Option<String>,
 
-    // Github client secret
+    /// Cognito client_id
     #[clap(long)]
-    #[serde(serialize_with = "serialize_secret_opt_str", default)]
-    pub github_client_secret: Option<SecretString>,
+    pub cognito_client_id: Option<String>,
 
+    /// Entry point to the Cognito authentication flow
     #[clap(long)]
-    /// GitHub App ID
-    pub github_app_id: Option<u64>,
+    pub cognito_auth_url: Option<reqwest::Url>,
 
+    /// Auth management base URL
     #[clap(long)]
-    /// GitHub App installation ID
-    pub github_app_install_id: Option<u64>,
+    pub cognito_mgmt_url: Option<reqwest::Url>,
 
+    /// URL from which to initialize Cognito configuration
     #[clap(long)]
-    /// Path to a GitHub private key file, for signing access token requests
-    pub github_app_private_key: Option<PathBuf>,
+    pub cognito_config_url: Option<reqwest::Url>,
+
+    //
+    // Cloud-based Github App installation-specific values
+    //
+    /// Instance-specific shared secret between bloop c&c & instance
+    #[clap(long)]
+    pub bloop_instance_secret: Option<Uuid>,
+
+    /// Instance organization name
+    #[clap(long)]
+    pub bloop_instance_org: Option<String>,
 
     #[clap(long)]
     #[serde(serialize_with = "serialize_secret_opt_str", default)]
@@ -166,6 +186,10 @@ pub struct Configuration {
     /// Path to built front-end folder
     #[clap(long)]
     pub frontend_dist: Option<PathBuf>,
+
+    #[clap(long)]
+    /// Address for the embedding server
+    pub embedding_server_url: Option<reqwest::Url>,
 }
 
 macro_rules! right_if_default {
@@ -176,6 +200,14 @@ macro_rules! right_if_default {
             $left
         }
     };
+}
+
+#[derive(Deserialize)]
+struct RemoteConfig {
+    auth_url: reqwest::Url,
+    mgmt_url: reqwest::Url,
+    client_id: String,
+    userpool_id: String,
 }
 
 impl Configuration {
@@ -192,24 +224,34 @@ impl Configuration {
         self.index_dir.join(name)
     }
 
-    pub fn github_client_id_and_secret(&self) -> Option<(&str, &str)> {
-        let id = self.github_client_id.as_ref()?.expose_secret();
-        let secret = self.github_client_secret.as_ref()?.expose_secret();
-        Some((id, secret))
-    }
-
     pub fn cli_overriding_config_file() -> Result<Self> {
         let cli = Self::from_cli()?;
         let Ok(file) = cli
             .config_file
             .as_ref()
             .context("no config file specified")
-            .and_then(Self::read) else
-        {
+            .and_then(Self::read)
+        else {
             return Ok(cli);
         };
 
         Ok(Self::merge(file, cli))
+    }
+
+    pub async fn with_remote_cognito_config(mut self) -> Result<Self> {
+        let url = self
+            .cognito_config_url
+            .clone()
+            .context("Invalid config, cognito_config_url missing")?;
+
+        let config: RemoteConfig = reqwest::get(url).await?.json().await?;
+
+        self.cognito_auth_url = Some(config.auth_url);
+        self.cognito_mgmt_url = Some(config.mgmt_url);
+        self.cognito_client_id = Some(config.client_id);
+        self.cognito_userpool_id = Some(config.userpool_id);
+
+        Ok(self)
     }
 
     /// Merge 2 configurations with values from `b` taking precedence
@@ -257,11 +299,23 @@ impl Configuration {
                 default_max_chunk_tokens()
             ),
 
-            overlap: b.overlap.or(a.overlap),
+            collection_name: right_if_default!(
+                b.collection_name,
+                a.collection_name,
+                default_collection_name()
+            ),
+
+            embedding_batch_size: right_if_default!(
+                b.embedding_batch_size,
+                a.embedding_batch_size,
+                interactive_batch_size()
+            ),
+
+            embedding_server_url: b.embedding_server_url.or(a.embedding_server_url),
 
             frontend_dist: b.frontend_dist.or(a.frontend_dist),
 
-            qdrant_url: b.qdrant_url.or(a.qdrant_url),
+            qdrant_url: right_if_default!(b.qdrant_url, a.qdrant_url, String::new()),
 
             answer_api_url: right_if_default!(
                 b.answer_api_url,
@@ -269,15 +323,19 @@ impl Configuration {
                 default_answer_api_url()
             ),
 
-            github_client_id: b.github_client_id.or(a.github_client_id),
+            cognito_userpool_id: b.cognito_userpool_id.or(a.cognito_userpool_id),
 
-            github_client_secret: b.github_client_secret.or(a.github_client_secret),
+            cognito_client_id: b.cognito_client_id.or(a.cognito_client_id),
 
-            github_app_id: b.github_app_id.or(a.github_app_id),
+            cognito_auth_url: b.cognito_auth_url.or(a.cognito_auth_url),
 
-            github_app_install_id: b.github_app_install_id.or(a.github_app_install_id),
+            cognito_mgmt_url: b.cognito_mgmt_url.or(a.cognito_mgmt_url),
 
-            github_app_private_key: b.github_app_private_key.or(a.github_app_private_key),
+            cognito_config_url: b.cognito_config_url.or(a.cognito_config_url),
+
+            bloop_instance_secret: b.bloop_instance_secret.or(a.bloop_instance_secret),
+
+            bloop_instance_org: b.bloop_instance_org.or(a.bloop_instance_org),
 
             instance_domain: b.instance_domain.or(a.instance_domain),
 
@@ -294,6 +352,11 @@ impl Configuration {
 
             dylib_dir: b.dylib_dir.or(a.dylib_dir),
         }
+    }
+
+    /// Directory where logs are written to
+    pub fn log_dir(&self) -> PathBuf {
+        self.index_dir.join("logs")
     }
 }
 
@@ -331,6 +394,10 @@ fn default_model_dir() -> PathBuf {
     "model".into()
 }
 
+fn default_collection_name() -> String {
+    "documents".into()
+}
+
 pub fn default_parallelism() -> usize {
     std::thread::available_parallelism().unwrap().get()
 }
@@ -339,12 +406,12 @@ pub const fn minimum_parallelism() -> usize {
     1
 }
 
-const fn default_buffer_size() -> usize {
-    100_000_000
+pub const fn default_buffer_size() -> usize {
+    500_000_000
 }
 
 const fn default_repo_buffer_size() -> usize {
-    30_000_000
+    200_000_000
 }
 
 const fn default_port() -> u16 {
@@ -355,10 +422,19 @@ fn default_host() -> String {
     String::from("127.0.0.1")
 }
 
+fn default_qdrant_url() -> String {
+    String::from("http://127.0.0.1:6334")
+}
+
 fn default_answer_api_url() -> String {
     String::from("http://127.0.0.1:7879")
 }
 
 fn default_max_chunk_tokens() -> usize {
     256
+}
+
+fn interactive_batch_size() -> NonZeroUsize {
+    let batch_size = if cfg!(feature = "metal") { 5 } else { 1 };
+    NonZeroUsize::new(batch_size).unwrap()
 }

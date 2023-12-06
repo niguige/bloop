@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use tracing::instrument;
 
 use crate::{
     agent::{
@@ -11,6 +12,7 @@ use crate::{
 };
 
 impl Agent {
+    #[instrument(skip(self))]
     pub async fn path_search(&mut self, query: &String) -> Result<String> {
         self.update(Update::StartStep(SearchStep::Path {
             query: query.clone(),
@@ -32,7 +34,7 @@ impl Agent {
         // If there are no lexical results, perform a semantic search.
         if paths.is_empty() {
             let semantic_paths = self
-                .semantic_search(query.into(), 30, 0, 0.0, true)
+                .semantic_search(query.into(), vec![], 30, 0, 0.0, true)
                 .await?
                 .into_iter()
                 .map(|chunk| chunk.relative_path)

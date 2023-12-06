@@ -1,7 +1,6 @@
-import React, { memo, useEffect, useRef, useState } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import CodeLine from '../Code/CodeLine';
 import { Token as TokenType } from '../../../types/prism';
-import { propsAreShallowEqual } from '../../../utils';
 import { Range, TokenInfoType, TokenInfoWrapped } from '../../../types/results';
 import RefsDefsPopup from '../../TooltipCode/RefsDefsPopup';
 import { useOnClickOutside } from '../../../hooks/useOnClickOutsideHook';
@@ -11,7 +10,7 @@ import { Metadata, BlameLine } from './index';
 
 type Props = {
   language: string;
-  metadata: Metadata;
+  metadata?: Metadata;
   repoName: string;
   tokens: TokenType[][];
   foldableRanges: Record<number, number>;
@@ -38,6 +37,8 @@ type Props = {
     | { lines: [number, number]; color: string; index: number }
     | undefined
   )[];
+  hoveredLines: [number, number] | null;
+  isDiff?: boolean;
 };
 
 const CodeContainerFull = ({
@@ -60,6 +61,8 @@ const CodeContainerFull = ({
   handleRefsDefsClick,
   relativePath,
   highlights,
+  hoveredLines,
+  isDiff,
 }: Props) => {
   const ref = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -95,6 +98,8 @@ const CodeContainerFull = ({
         });
         setPopupVisible(true);
       }
+    } else {
+      setPopupPosition(null);
     }
   }, [tokenInfo]);
 
@@ -131,8 +136,31 @@ const CodeContainerFull = ({
     }
   }, []);
 
+  const lineNumbersAdd = useMemo(() => {
+    let curr = 0;
+    return tokens.map((line, i) => {
+      if (line[0]?.content === '-' || line[1]?.content === '-') {
+        return null;
+      } else {
+        curr++;
+        return curr;
+      }
+    });
+  }, [tokens]);
+  const lineNumbersRemove = useMemo(() => {
+    let curr = 0;
+    return tokens.map((line, i) => {
+      if (line[0]?.content === '+' || line[1]?.content === '+') {
+        return null;
+      } else {
+        curr++;
+        return curr;
+      }
+    });
+  }, [tokens]);
+
   return (
-    <div ref={ref} className="relative pb-60">
+    <div ref={ref} className="relative pb-14">
       {tokens.map((line, index) => {
         let highlightForLine = highlights
           ?.sort((a, b) =>
@@ -155,7 +183,7 @@ const CodeContainerFull = ({
             showLineNumbers={true}
             lineHidden={!!foldedLines[index]}
             blameLine={blameLines[index]}
-            blame={!!metadata.blame?.length}
+            blame={!!metadata?.blame?.length}
             hoverEffect
             onMouseSelectStart={onMouseSelectStart}
             onMouseSelectEnd={onMouseSelectEnd}
@@ -170,12 +198,26 @@ const CodeContainerFull = ({
                 ? highlights[highlightForLine]?.color
                 : highlightColor
             }
+            hoveredBackground={
+              !!hoveredLines &&
+              index >= hoveredLines[0] &&
+              index <= hoveredLines[1]
+            }
             searchTerm={searchTerm}
+            isNewLine={
+              isDiff && (line[0]?.content === '+' || line[1]?.content === '+')
+            }
+            isRemovedLine={
+              isDiff && (line[0]?.content === '-' || line[1]?.content === '-')
+            }
+            lineNumbersDiff={
+              isDiff ? [lineNumbersRemove[index], lineNumbersAdd[index]] : null
+            }
           >
             {line.map((token, i) => (
               <Token
                 key={`cell-${index}-${i}`}
-                lineHoverRanges={metadata.hoverableRanges[index]}
+                lineHoverRanges={metadata?.hoverableRanges[index] || []}
                 token={token}
                 getHoverableContent={getHoverableContent}
               />
@@ -199,4 +241,4 @@ const CodeContainerFull = ({
   );
 };
 
-export default memo(CodeContainerFull, propsAreShallowEqual);
+export default memo(CodeContainerFull);

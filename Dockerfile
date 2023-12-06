@@ -11,7 +11,7 @@ COPY client/ client
 COPY playwright.config.js .
 RUN npm run build-web
 
-FROM rust:slim-bookworm as builder
+FROM rust:1.73-slim-bookworm as builder
 WORKDIR /build
 RUN apt-get update && \
     apt-get -y install make clang libc-dev curl cmake python3 protobuf-compiler pkg-config libssl3 libssl-dev git && \
@@ -27,7 +27,7 @@ COPY server server
 COPY apps/desktop/src-tauri apps/desktop/src-tauri
 COPY Cargo.lock Cargo.toml .
 RUN --mount=target=/root/.cache/sccache,type=cache --mount=target=/build/target,type=cache \
-    cargo --locked build -p bleep --release --features=ee && \
+    cargo --locked build --bin bleep --release --features=ee-cloud && \
     cp /build/target/release/bleep / && \
     sccache --show-stats && \
     mkdir /dylib && \

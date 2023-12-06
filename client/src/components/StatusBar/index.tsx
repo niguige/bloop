@@ -1,29 +1,67 @@
-import React, { useContext, useEffect, useState } from 'react';
+import React, {
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import Button from '../Button';
-import { DiscordLogo, Globe, Magazine, Papers, PowerPlug } from '../../icons';
+import { DiscordLogo, Info, Magazine, PowerPlug } from '../../icons';
 import { UIContext } from '../../context/uiContext';
 import { DeviceContext } from '../../context/deviceContext';
-import { getDiscordLink } from '../../services/api';
-import { MenuListItemType } from '../ContextMenu';
-import DropdownWithIcon from '../Dropdown/WithIcon';
-import { LocaleContext } from '../../context/localeContext';
+import { getDiscordLink, getSubscriptionLink } from '../../services/api';
 import LanguageSelector from '../LanguageSelector';
+import { PersonalQuotaContext } from '../../context/personalQuotaContext';
+import LiteLoaderContainer from '../Loaders/LiteLoader';
+import Tooltip from '../Tooltip';
+import { polling } from '../../utils/requestUtils';
 import StatusItem from './StatusItem';
 
+let intervalId: number;
 const StatusBar = () => {
   const { t } = useTranslation();
 
   const { setBugReportModalOpen } = useContext(UIContext.BugReport);
   const { openLink, release } = useContext(DeviceContext);
+  const { quota, isSubscribed, hasCheckedQuota } = useContext(
+    PersonalQuotaContext.Values,
+  );
+  const { refetchQuota } = useContext(PersonalQuotaContext.Handlers);
+  const { setWaitingUpgradePopupOpen } = useContext(UIContext.UpgradePopup);
   const [isOnline, setIsOnline] = useState(true);
   const [discordLink, setDiscordLink] = useState(
     'https://discord.com/invite/kZEgj5pyjm',
   );
+  const [isFetchingLink, setIsFetchingLink] = useState(false);
 
   useEffect(() => {
     getDiscordLink().then(setDiscordLink);
   }, []);
+
+  const handleUpgrade = useCallback(() => {
+    setIsFetchingLink(true);
+    setWaitingUpgradePopupOpen(true);
+    getSubscriptionLink()
+      .then((resp) => {
+        if (resp.url) {
+          openLink(resp.url);
+          clearInterval(intervalId);
+          intervalId = polling(() => refetchQuota(), 2000);
+          setTimeout(() => clearInterval(intervalId), 10 * 60 * 1000);
+        } else {
+          setBugReportModalOpen(true);
+        }
+      })
+      .catch(() => {
+        setBugReportModalOpen(true);
+      })
+      .finally(() => setIsFetchingLink(false));
+  }, [openLink]);
+
+  useEffect(() => {
+    clearInterval(intervalId);
+  }, [isSubscribed]);
 
   useEffect(() => {
     const setOffline = () => {
@@ -63,6 +101,36 @@ const StatusBar = () => {
       </span>
       <span className="flex gap-3 items-center">
         <p className="text-label-muted caption">v{release}</p>
+        {!isSubscribed && hasCheckedQuota && (
+          <>
+            <div className="w-px h-4 bg-bg-border" />
+            <Tooltip
+              text={
+                <div className="max-w-[13rem]">
+                  {t(
+                    'Your quota resets every 24 hours, upgrade for unlimited uses',
+                  )}
+                </div>
+              }
+              placement={'top'}
+            >
+              <div className="flex gap-1 items-center caption text-label-base">
+                <Info raw sizeClassName="w-3.5 h-3.5" />
+                <p className="pt-0.5">
+                  {quota.allowed - quota.used}/{quota.allowed}{' '}
+                  <Trans count={quota.allowed - quota.used}>uses left</Trans>
+                </p>
+              </div>
+            </Tooltip>
+            <Button size="small" onClick={handleUpgrade}>
+              {isFetchingLink ? (
+                <LiteLoaderContainer />
+              ) : (
+                <Trans>Upgrade</Trans>
+              )}
+            </Button>
+          </>
+        )}
         <Button
           size="small"
           variant="secondary"
@@ -90,4 +158,4 @@ const StatusBar = () => {
     </div>
   );
 };
-export default StatusBar;
+export default memo(StatusBar);

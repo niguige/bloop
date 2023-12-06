@@ -10,6 +10,7 @@ use crate::{
         reader::{base_name, ContentReader, FileReader, OpenReader, RepoReader},
         DocumentRead, File, Indexable, Indexer, Indexes, Repo,
     },
+    repo::RepoRef,
     snippet::{HighlightedString, SnippedFile, Snipper},
 };
 
@@ -43,6 +44,10 @@ fn div_ceil(a: usize, b: usize) -> usize {
 pub struct ApiQuery {
     /// A query written in the bloop query language
     pub q: String,
+
+    /// Optional RepoRef to constrain the search. If not provided, search all repos
+    #[serde(default)]
+    pub repo_ref: Option<RepoRef>,
 
     #[serde(default)]
     pub page: usize,
@@ -148,6 +153,30 @@ pub struct FileResultData {
     repo_ref: String,
     lang: Option<String>,
     branches: String,
+    indexed: bool,
+    is_dir: bool,
+}
+
+impl FileResultData {
+    pub fn new(
+        repo_name: String,
+        relative_path: String,
+        repo_ref: String,
+        lang: Option<String>,
+        branches: String,
+        indexed: bool,
+        is_dir: bool,
+    ) -> Self {
+        Self {
+            repo_name,
+            relative_path: HighlightedString::new(relative_path),
+            repo_ref,
+            lang,
+            branches,
+            indexed,
+            is_dir,
+        }
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -158,6 +187,7 @@ pub struct FileData {
     lang: Option<String>,
     contents: String,
     siblings: Vec<DirEntry>,
+    indexed: bool,
     size: usize,
     loc: usize,
     sloc: usize,
@@ -180,7 +210,7 @@ pub struct DirEntry {
 #[derive(Serialize, PartialEq, Eq, Hash, Clone, Debug)]
 enum EntryData {
     Directory,
-    File { lang: Option<String> },
+    File { lang: Option<String>, indexed: bool },
 }
 
 #[async_trait]
@@ -474,6 +504,8 @@ impl ExecuteQuery for FileReader {
                     repo_ref: f.repo_ref,
                     lang: f.lang,
                     branches: f.branches,
+                    indexed: f.indexed,
+                    is_dir: f.is_dir,
                 })
             })
             .collect::<Vec<QueryResult>>();
@@ -615,12 +647,16 @@ impl ExecuteQuery for OpenReader {
             .map(|d| d.relative_path.to_owned())
             .collect::<Vec<_>>();
 
+        tracing::trace!(?relative_paths, "creating collector");
+
         let collector = BytesFilterCollector::new(
             indexer.source.raw_relative_path,
             move |b| {
                 let Ok(relative_path) = std::str::from_utf8(b) else {
                     return false;
                 };
+
+                tracing::trace!(?relative_path, "filtering relative path");
 
                 // Check if *any* of the relative paths match. We can't compare repositories here
                 // because the `BytesFilterCollector` operates on one field. So we sort through this
@@ -675,6 +711,7 @@ impl ExecuteQuery for OpenReader {
                         contents: doc.content.clone(),
                         size: doc.content.len(),
                         loc: doc.line_end_indices.len(),
+                        indexed: doc.indexed,
                         sloc: doc
                             .line_end_indices
                             .iter()
@@ -706,6 +743,7 @@ impl ExecuteQuery for OpenReader {
                             } else {
                                 EntryData::File {
                                     lang: doc.lang.clone(),
+                                    indexed: doc.indexed,
                                 }
                             },
                         });
@@ -775,7 +813,7 @@ mod tests {
                       "end": 56,
                     }],
                     "symbols": [],
-                    "data": r#"        mut writer: IndexWriter,\n        _threads: usize,\n    ) -> Result<()> {"#,
+                    "data": r"        mut writer: IndexWriter,\n        _threads: usize,\n    ) -> Result<()> {",
                     "line_range": {
                       "start": 49,
                       "end": 51
@@ -811,7 +849,7 @@ mod tests {
                 repo_ref: "/User/bloop/bleep".into(),
                 lang: Some("Rust".into()),
                 snippets: vec![Snippet {
-                    data: r#"        mut writer: IndexWriter,\n        _threads: usize,\n    ) -> Result<()> {"#.to_owned(),
+                    data: r"        mut writer: IndexWriter,\n        _threads: usize,\n    ) -> Result<()> {".to_owned(),
                     line_range: 49..51,
                     highlights: vec![51..56],
                     symbols: vec![],

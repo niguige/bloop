@@ -10,6 +10,13 @@
 #![warn(unused_crate_dependencies)]
 #![allow(elided_lifetimes_in_paths)]
 
+#[cfg(all(feature = "onnx", feature = "metal"))]
+compile_error!("cannot enable `onnx` and `metal` at the same time");
+
+// only used in the binary
+#[cfg(feature = "color-eyre")]
+use color_eyre as _;
+
 #[cfg(any(bench, test))]
 use criterion as _;
 
@@ -20,13 +27,15 @@ use git_version as _;
 #[cfg(all(feature = "debug", not(tokio_unstable)))]
 use console_subscriber as _;
 
-use secrecy::SecretString;
 use state::PersistedState;
 use std::fs::canonicalize;
 use user::UserProfile;
 
-use crate::{background::SyncQueue, indexes::Indexes, semantic::Semantic, state::RepositoryPool};
-use anyhow::{bail, Result};
+use crate::{
+    background::SyncQueue, indexes::Indexes, remotes::CognitoGithubTokenBundle, semantic::Semantic,
+    state::RepositoryPool, webserver::middleware::User,
+};
+use anyhow::{bail, Context, Result};
 use axum::extract::FromRef;
 
 use once_cell::sync::OnceCell;
@@ -45,15 +54,16 @@ mod agent;
 mod background;
 mod cache;
 mod collector;
+mod commits;
 mod config;
 mod db;
 mod env;
 mod llm_gateway;
 mod remotes;
 mod repo;
+mod scraper;
 mod webserver;
 
-#[cfg(feature = "ee")]
 mod ee;
 
 pub mod analytics;
@@ -93,13 +103,13 @@ pub struct Application {
     sync_queue: SyncQueue,
 
     /// Semantic search subsystem
-    semantic: Option<Semantic>,
+    semantic: Semantic,
 
     /// Tantivy indexes
     indexes: Arc<Indexes>,
 
     /// Remote backend credentials
-    credentials: remotes::Backends,
+    credentials: PersistedState<remotes::Backends>,
 
     /// Main cookie encryption keypair
     cookie_key: axum_extra::extract::cookie::Key,
@@ -124,39 +134,60 @@ impl Application {
         config.max_threads = config.max_threads.max(minimum_parallelism());
         let threads = config.max_threads;
 
-        // 3MiB buffer size is minimum for Tantivy
-        config.buffer_size = config.buffer_size.max(threads * 3_000_000);
-        config.repo_buffer_size = config.repo_buffer_size.max(threads * 3_000_000);
+        // 15MiB buffer size is minimum for Tantivy
+        config.buffer_size = config.buffer_size.max(threads * 15_000_000);
+        config.repo_buffer_size = config.repo_buffer_size.max(threads * 15_000_000);
         config.source.set_default_dir(&config.index_dir);
 
+        // Finalize config
         let config = Arc::new(config);
         debug!(?config, "effective configuration");
 
-        let sqlite = Arc::new(db::init(&config).await?);
+        // Load repositories
+        let repo_pool = config.source.initialize_pool()?;
 
-        // Initialise Semantic index if `qdrant_url` set in config
-        let semantic = match config.qdrant_url {
-            Some(ref url) => {
-                match Semantic::initialize(&config.model_dir, url, Arc::clone(&config)).await {
-                    Ok(semantic) => Some(semantic),
-                    Err(e) => {
-                        bail!("Qdrant initialization failed: {}", e);
-                    }
-                }
-            }
-            None => {
-                warn!("Semantic search disabled because `qdrant_url` is not provided. Starting without.");
-                None
-            }
-        };
+        // Databases & indexes
+        let sql = Arc::new(db::initialize(&config).await?);
+        let semantic =
+            Semantic::initialize(&config.model_dir, &config.qdrant_url, Arc::clone(&config))
+                .await
+                .context("qdrant initialization failed")?;
 
-        let env = if config.github_app_id.is_some() {
+        // Wipe existing dbs & caches if the schema has changed
+        let mut was_index_reset = false;
+        if config.source.index_version_mismatch() {
+            debug!("schema version mismatch, resetting state");
+            was_index_reset = true;
+            Indexes::reset_databases(&config)?;
+            debug!("tantivy indexes deleted");
+
+            cache::FileCache::new(sql.clone(), semantic.clone())
+                .reset(&repo_pool)
+                .await?;
+            debug!("caches deleted");
+
+            semantic.reset_collection_blocking().await?;
+            debug!("semantic indexes deleted");
+            debug!("state reset complete");
+        }
+
+        config.source.save_index_version()?;
+        debug!("index version saved");
+
+        let indexes = Indexes::new(&config, sql.clone(), was_index_reset)
+            .await?
+            .into();
+        debug!("indexes initialized");
+
+        // Enforce capabilies and features depending on environment
+        let env = if config.bloop_instance_secret.is_some() {
             info!("Starting bleep in private server mode");
             Environment::private_server()
         } else {
             env
         };
 
+        // Analytics backend
         let analytics = match initialize_analytics(&config, tracking_seed, analytics_options) {
             Ok(analytics) => Some(analytics),
             Err(err) => {
@@ -165,22 +196,15 @@ impl Application {
             }
         };
 
-        let repo_pool = config.source.initialize_pool()?;
-
         Ok(Self {
-            indexes: Indexes::new(
-                repo_pool.clone(),
-                config.clone(),
-                sqlite.clone(),
-                semantic.clone(),
-            )
-            .await?
-            .into(),
             sync_queue: SyncQueue::start(config.clone()),
             cookie_key: config.source.initialize_cookie_key()?,
-            credentials: config.source.initialize_credentials()?.into(),
+            credentials: config
+                .source
+                .load_state_or("credentials", remotes::Backends::default())?,
             user_profiles: config.source.load_or_default("user_profiles")?,
-            sql: sqlite,
+            sql,
+            indexes,
             repo_pool,
             analytics,
             semantic,
@@ -211,10 +235,9 @@ impl Application {
 
         sentry::configure_scope(|scope| {
             scope.add_event_processor(|event| {
-                let Some(ref logger) = event.logger
-		else {
-		    return Some(event);
-		};
+                let Some(ref logger) = event.logger else {
+                    return Some(event);
+                };
 
                 match logger.as_ref() {
                     "tower_http::catch_panic" => None,
@@ -235,15 +258,13 @@ impl Application {
             warn!("Failed to install tracing_subscriber. There's probably one already...");
         };
 
-        if color_eyre::install().is_err() {
-            warn!("Failed to install color-eyre. Oh well...");
-        };
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!("panic occurred: {info}");
+            hook(info);
+        }));
 
         LOGGER_INSTALLED.set(true).unwrap();
-    }
-
-    pub fn user(&self) -> Option<String> {
-        self.credentials.user()
     }
 
     pub async fn run(self) -> Result<()> {
@@ -255,9 +276,7 @@ impl Application {
             joins.spawn(self.write_index().startup_scan());
         } else {
             if !self.config.disable_background {
-                tokio::spawn(periodic::sync_github_status(self.clone()));
-                tokio::spawn(periodic::check_repo_updates(self.clone()));
-                tokio::spawn(periodic::log_and_branch_rotate(self.clone()));
+                periodic::start_background_jobs(self.clone());
             }
 
             joins.spawn(webserver::start(self));
@@ -286,9 +305,15 @@ impl Application {
         false
     }
 
-    fn track_query(&self, user: &webserver::middleware::User, event: &analytics::QueryEvent) {
+    fn track_query(&self, user: &User, event: &analytics::QueryEvent) {
         if let Some(analytics) = self.analytics.as_ref() {
             analytics.track_query(user, event.clone());
+        }
+    }
+
+    fn track_studio(&self, user: &User, event: analytics::StudioEvent) {
+        if let Some(analytics) = self.analytics.as_ref() {
+            analytics.track_studio(user, event);
         }
     }
 
@@ -297,46 +322,86 @@ impl Application {
         self.analytics.as_ref().map(f)
     }
 
-    fn org_name(&self) -> Option<String> {
+    pub fn username(&self) -> Option<String> {
+        self.credentials.user().clone()
+    }
+
+    pub(crate) async fn user(&self) -> User {
         self.credentials
-            .github()
-            .and_then(|state| match state.auth {
-                remotes::github::Auth::App { org, .. } => Some(org),
-                _ => None,
+            .user()
+            .zip(self.credentials.github())
+            .and_then(|(user, gh)| {
+                use crate::remotes::github::{Auth, State};
+                match gh {
+                    State {
+                        auth:
+                            Auth::OAuth(CognitoGithubTokenBundle {
+                                access_token: ref token,
+                                ..
+                            }),
+                        ..
+                    } => Some(User::Desktop {
+                        access_token: token.clone(),
+                        login: user,
+                        crab: Arc::new(move || Ok(gh.client()?)),
+                    }),
+                    _ => None,
+                }
             })
+            .unwrap_or_else(|| User::Unknown)
     }
 
     fn write_index(&self) -> background::BoundSyncQueue {
-        self.sync_queue.bind(self.clone())
+        background::BoundSyncQueue(self.clone())
     }
 
-    fn github_token(&self) -> Result<Option<SecretString>> {
-        Ok(if self.env.allow(env::Feature::GithubDeviceFlow) {
-            let Some(cred) = self.credentials.github() else {
-                bail!("missing Github token");
-            };
+    fn seal_auth_state(&self, payload: serde_json::Value) -> String {
+        use base64::Engine;
+        use rand::RngCore;
 
-            use remotes::github::{Auth, State};
-            match cred {
-                State {
-                    auth:
-                        Auth::OAuth {
-                            access_token: token,
-                            ..
-                        },
-                    ..
-                } => Some(token),
+        let privkey = {
+            let bytes = self
+                .config
+                .bloop_instance_secret
+                .as_ref()
+                .expect("no instance secret configured")
+                .as_bytes();
 
-                State {
-                    auth: Auth::App { .. },
-                    ..
-                } => {
-                    bail!("cannot connect to answer API using installation token");
-                }
-            }
-        } else {
-            None
-        })
+            ring::aead::LessSafeKey::new(
+                ring::aead::UnboundKey::new(&ring::aead::AES_128_GCM, bytes)
+                    .expect("bad key initialization"),
+            )
+        };
+
+        let (nonce, nonce_str) = {
+            let mut buf = [0; 12];
+            rand::thread_rng().fill_bytes(&mut buf);
+
+            let nonce_str = hex::encode(buf);
+            (ring::aead::Nonce::assume_unique_for_key(buf), nonce_str)
+        };
+
+        let (enc, tag) = {
+            let mut serialized = serde_json::to_vec(&payload).unwrap();
+            let tag = privkey
+                .seal_in_place_separate_tag(nonce, ring::aead::Aad::empty(), &mut serialized)
+                .expect("encryption failed");
+
+            (
+                base64::engine::general_purpose::URL_SAFE.encode(serialized),
+                base64::engine::general_purpose::URL_SAFE.encode(tag),
+            )
+        };
+
+        base64::engine::general_purpose::URL_SAFE.encode(
+            serde_json::to_vec(&serde_json::json!({
+            "org": self.config.bloop_instance_org.as_ref().expect("bad config"),
+            "n": nonce_str,
+            "enc": enc,
+            "tag": tag
+            }))
+            .expect("bad encoding"),
+        )
     }
 }
 
@@ -350,8 +415,7 @@ fn tracing_subscribe(config: &Configuration) -> bool {
     let env_filter_layer = fmt::layer().with_filter(EnvFilter::from_env(LOG_ENV_VAR));
     let sentry_layer = sentry_layer();
     let log_writer_layer = (!config.disable_log_write).then(|| {
-        let log_dir = config.index_dir.join("logs");
-        let file_appender = tracing_appender::rolling::daily(log_dir, "bloop.log");
+        let file_appender = tracing_appender::rolling::daily(config.log_dir(), "bloop.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         _ = LOGGER_GUARD.set(guard);
         fmt::layer()
@@ -400,21 +464,23 @@ where
         })
 }
 
+#[tracing::instrument(skip_all)]
 fn initialize_analytics(
     config: &Configuration,
     tracking_seed: impl Into<Option<String>>,
     options: impl Into<Option<analytics::HubOptions>>,
 ) -> Result<Arc<analytics::RudderHub>> {
+    debug!("creating configuration");
+
     let Some(key) = &config.analytics_key else {
-            bail!("analytics key missing; skipping initialization");
-        };
+        bail!("analytics key missing; skipping initialization");
+    };
 
     let Some(data_plane) = &config.analytics_data_plane else {
-            bail!("analytics data plane url missing; skipping initialization");
-        };
+        bail!("analytics data plane url missing; skipping initialization");
+    };
 
     let options = options.into().unwrap_or_else(|| analytics::HubOptions {
-        event_filter: Some(Arc::new(Some)),
         package_metadata: Some(analytics::PackageMetadata {
             name: env!("CARGO_CRATE_NAME"),
             version: env!("CARGO_PKG_VERSION"),
@@ -422,7 +488,6 @@ fn initialize_analytics(
         }),
     });
 
-    info!("configuring analytics ...");
     tokio::task::block_in_place(|| {
         analytics::RudderHub::new_with_options(
             &config.source,

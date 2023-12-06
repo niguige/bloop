@@ -18,10 +18,6 @@ const CloudApp = () => {
     (getPlainFromStorage(LANGUAGE_KEY) as LocaleType | null) || 'en',
   );
 
-  useEffect(() => {
-    setTimeout(() => getConfig().then(setEnvConfig), 1000); // server returns wrong tracking_id within first second
-  }, []);
-
   const deviceContextValue = useMemo(
     () => ({
       openFolderInExplorer: () => {},
@@ -35,7 +31,7 @@ const CloudApp = () => {
         platform: '',
         version: '',
       },
-      invokeTauriCommand: () => {},
+      invokeTauriCommand: () => Promise.resolve(''),
       release: packageJson.version,
       apiUrl: import.meta.env.API_URL || '/api',
       isRepoManagementAllowed: true,

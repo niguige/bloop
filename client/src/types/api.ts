@@ -1,4 +1,10 @@
 import { SymbolType, Range, TokenInfoType } from './results';
+import {
+  DiffChunkType,
+  DiffHunkType,
+  StudioContextDoc,
+  StudioContextFile,
+} from './general';
 
 export interface RangeLine {
   byte: number;
@@ -73,6 +79,7 @@ export interface SearchResponseFile {
   repo_name: string;
   repo_ref: string;
   lang: string;
+  is_dir: boolean;
 }
 
 export interface FlagItem {
@@ -120,6 +127,7 @@ export interface Directory {
 export interface DirectoryFileEntryData {
   File: {
     lang: string;
+    indexed: boolean;
   };
 }
 
@@ -138,6 +146,7 @@ export interface File {
   size: number;
   loc: number;
   sloc: number;
+  indexed: boolean;
 }
 
 export interface FileResponse {
@@ -241,12 +250,60 @@ export type SearchStepType = ProcStep | CodeStep | PathStep;
 export type ConversationType = {
   id: string;
   search_steps: SearchStepType[];
-  query: { target: { Plain: string } };
+  query: {
+    raw_query: string;
+    repos: [];
+    paths: {
+      Plain: { start: number; end: number; content: string };
+    }[];
+    langs: {
+      Plain: {
+        start: number;
+        end: number;
+        content: string;
+      };
+    }[];
+    branch: {
+      Plain: {
+        start: number;
+        end: number;
+        content: string;
+      };
+    }[];
+    target: {
+      Plain: {
+        start: number;
+        end: number;
+        content: string;
+      };
+    };
+  };
   conclusion: string;
   answer: string;
   paths: string[];
   response_timestamp: string;
   focused_chunk: { file_path: string } | null;
+};
+
+export type CodeStudioMessageType =
+  | {
+      User: string;
+    }
+  | { Assistant: string };
+
+export type CodeStudioType = {
+  id: string;
+  name: string;
+  modified_at: string;
+  messages: CodeStudioMessageType[];
+  context: StudioContextFile[];
+  doc_context: StudioContextDoc[];
+  token_counts: {
+    total: number;
+    per_file: (number | null)[];
+    per_doc_file: (number | null)[];
+    messages: number;
+  };
 };
 
 export interface SuggestionsResponse {
@@ -276,3 +333,53 @@ export interface NLSearchResponse {
   snippets: NLSnippet[];
   user_id: string;
 }
+
+export type StudioTemplateType = {
+  id: string;
+  name: string;
+  content: string;
+  modified_at: string;
+  is_default: boolean;
+};
+
+export type HistoryConversationTurn = CodeStudioType & {
+  id: number;
+  modified_at: string;
+};
+
+export type TutorialQuestionType = {
+  tag: string;
+  question: string;
+};
+
+export type DocShortType = {
+  id: string;
+  name: string;
+  url: string;
+  favicon: string;
+};
+
+export type DocPageType = {
+  doc_id: number;
+  doc_source: string;
+  relative_url: string;
+  absolute_url: string;
+  doc_title: string;
+};
+
+export type DocSectionType = {
+  ancestry: string[];
+  doc_id: number;
+  doc_source: string;
+  doc_title: string;
+  header: string;
+  point_id: string;
+  relative_url: string;
+  absolute_url: string;
+  section_range: { start: number; end: number };
+  text: string;
+};
+
+export type GeneratedCodeDiff = {
+  chunks: DiffChunkType[];
+};

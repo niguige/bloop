@@ -2,7 +2,6 @@ import { Align, FixedSizeList } from 'react-window';
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import CodeLine from '../Code/CodeLine';
 import { Token as TokenType } from '../../../types/prism';
-import { propsAreShallowEqual } from '../../../utils';
 import { Range, TokenInfoType, TokenInfoWrapped } from '../../../types/results';
 import { getOffsetForIndexAndAlignment } from '../../../utils/scrollUtils';
 import RefsDefsPopup from '../../TooltipCode/RefsDefsPopup';
@@ -13,7 +12,7 @@ import { Metadata, BlameLine } from './index';
 
 type Props = {
   language: string;
-  metadata: Metadata;
+  metadata?: Metadata;
   repoName: string;
   tokens: TokenType[][];
   foldableRanges: Record<number, number>;
@@ -46,6 +45,7 @@ type Props = {
     | { lines: [number, number]; color: string; index: number }
     | undefined
   )[];
+  hoveredLines: [number, number] | null;
 };
 
 const CodeContainerVirtualized = ({
@@ -70,6 +70,7 @@ const CodeContainerVirtualized = ({
   highlightColor,
   relativePath,
   highlights,
+  hoveredLines,
 }: Props) => {
   const ref = useRef<FixedSizeList>(null);
   const listProps = useMemo(
@@ -158,7 +159,7 @@ const CodeContainerVirtualized = ({
             showLineNumbers={true}
             lineHidden={!!foldedLines[index]}
             blameLine={blameLines[index]}
-            blame={!!metadata.blame?.length}
+            blame={!!metadata?.blame?.length}
             hoverEffect
             onMouseSelectStart={onMouseSelectStart}
             onMouseSelectEnd={onMouseSelectEnd}
@@ -175,11 +176,16 @@ const CodeContainerVirtualized = ({
             }
             searchTerm={searchTerm}
             stylesGenerated={style}
+            hoveredBackground={
+              !!hoveredLines &&
+              index >= hoveredLines[0] &&
+              index <= hoveredLines[1]
+            }
           >
             {tokens[index].map((token, i) => (
               <Token
                 key={`cell-${index}-${i}`}
-                lineHoverRanges={metadata.hoverableRanges[index]}
+                lineHoverRanges={metadata?.hoverableRanges[index] || []}
                 token={token}
                 getHoverableContent={(hr, tr) =>
                   getHoverableContent(hr, tr, index)
@@ -215,4 +221,4 @@ const CodeContainerVirtualized = ({
   );
 };
 
-export default memo(CodeContainerVirtualized, propsAreShallowEqual);
+export default memo(CodeContainerVirtualized);

@@ -1,17 +1,13 @@
 import React, {
+  memo,
   useCallback,
-  useContext,
   useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
-import debounce from 'lodash.debounce';
 import { useSearchParams } from 'react-router-dom';
-import { AnimatePresence, motion } from 'framer-motion';
-import { Trans } from 'react-i18next';
-import MiniMap from '../MiniMap';
 import { getPrismLanguage, tokenizeCode } from '../../../utils/prism';
 import { Range, TokenInfoType } from '../../../types/results';
 import {
@@ -22,13 +18,10 @@ import { Commit } from '../../../types';
 import useAppNavigation from '../../../hooks/useAppNavigation';
 import SearchOnPage from '../../SearchOnPage';
 import useKeyboardNavigation from '../../../hooks/useKeyboardNavigation';
-import { Feather, Info, Sparkle } from '../../../icons';
-import { ChatContext } from '../../../context/chatContext';
 import { MAX_LINES_BEFORE_VIRTUALIZE } from '../../../consts/code';
 import { findElementInCurrentTab } from '../../../utils/domUtils';
-import PortalContainer from '../../PortalContainer';
-import { UIContext } from '../../../context/uiContext';
 import CodeContainer from './CodeContainer';
+import ExplainButton from './ExplainButton';
 
 export interface BlameLine {
   start: boolean;
@@ -49,29 +42,27 @@ export interface Metadata {
 type Props = {
   code: string;
   language: string;
-  metadata: Metadata;
-  minimap?: boolean;
-  scrollElement: HTMLDivElement | null;
+  metadata?: Metadata;
   relativePath: string;
   repoPath: string;
   repoName: string;
   containerWidth: number;
   containerHeight: number;
   closePopup?: () => void;
+  isDiff?: boolean;
 };
 
 const CodeFull = ({
   language,
   code,
   metadata,
-  scrollElement,
-  minimap,
   relativePath,
   repoPath,
   repoName,
   containerWidth,
   containerHeight,
   closePopup,
+  isDiff,
 }: Props) => {
   const [foldableRanges, setFoldableRanges] = useState<Record<number, number>>(
     {},
@@ -107,14 +98,6 @@ const CodeFull = ({
     top: number;
     left: number;
   } | null>(null);
-  const {
-    setSubmittedQuery,
-    setChatOpen,
-    setSelectedLines,
-    setConversation,
-    setThreadId,
-  } = useContext(ChatContext.Setters);
-  const { setRightPanelOpen } = useContext(UIContext.RightPanel);
   const { navigateFullResult } = useAppNavigation();
 
   const [isSearchActive, setSearchActive] = useState(false);
@@ -169,7 +152,7 @@ const CodeFull = ({
 
   useEffect(() => {
     setFoldableRanges(
-      metadata.lexicalBlocks?.reduce(
+      metadata?.lexicalBlocks?.reduce(
         (acc, cur) => ({
           ...acc,
           [cur.start]: cur.end,
@@ -177,11 +160,11 @@ const CodeFull = ({
         {},
       ) || {},
     );
-  }, [metadata.lexicalBlocks]);
+  }, [metadata?.lexicalBlocks]);
 
   useEffect(() => {
     const bb: Record<number, BlameLine> = {};
-    metadata.blame?.forEach((item) => {
+    metadata?.blame?.forEach((item) => {
       bb[item.lineRange.start] = {
         start: true,
         commit: item.commit,
@@ -192,7 +175,7 @@ const CodeFull = ({
     });
 
     setBlameLines(bb);
-  }, [metadata.blame]);
+  }, [metadata?.blame]);
 
   const toggleBlock = useCallback(
     (fold: boolean, start: number) => {
@@ -209,17 +192,7 @@ const CodeFull = ({
     [foldableRanges],
   );
 
-  const [scrollPosition, setScrollPosition] = useState(0);
   const codeRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleScroll = debounce((val) => {
-      setScrollPosition((val.target as HTMLDivElement).scrollTop || 0);
-    }, 300);
-
-    scrollElement?.addEventListener('scroll', handleScroll);
-    return () => scrollElement?.removeEventListener('scroll', handleScroll);
-  });
 
   const tokens = useMemo(() => tokenizeCode(code, lang), [code, lang]);
 
@@ -231,16 +204,12 @@ const CodeFull = ({
       tokenName: string,
       tokenRange: string,
     ) => {
-      if (filePath === relativePath) {
-        setScrollToIndex([lineNum, lineNum]);
-      } else {
-        navigateFullResult(filePath, {
-          scrollToLine: `${lineNum}_${lineNum}`,
-          type,
-          tokenName,
-          tokenRange,
-        });
-      }
+      navigateFullResult(filePath, {
+        scrollToLine: `${lineNum}_${lineNum}`,
+        type,
+        tokenName,
+        tokenRange,
+      });
     },
     [repoName, relativePath],
   );
@@ -339,16 +308,26 @@ const CodeFull = ({
 
   const calculatePopupPosition = useCallback(
     (top: number, left: number) => {
+      let isInModal = true;
       let container = findElementInCurrentTab('.code-modal-container');
       if (!container) {
         container = findElementInCurrentTab('#result-full-code-container');
+        isInModal = false;
       }
       if (!container) {
         return null;
       }
       const containerRect = container?.getBoundingClientRect();
       if (currentSelection.length !== 0) {
-        return calculatePopupPositionInsideContainer(top, left, containerRect);
+        const fixedPositionInsideContainer =
+          calculatePopupPositionInsideContainer(top, left, containerRect);
+        if (isInModal) {
+          fixedPositionInsideContainer.top =
+            fixedPositionInsideContainer.top - containerRect.top / 2;
+          fixedPositionInsideContainer.left =
+            fixedPositionInsideContainer.left - containerRect.left;
+        }
+        return fixedPositionInsideContainer;
       }
       return null;
     },
@@ -393,10 +372,7 @@ const CodeFull = ({
         searchValue={searchTerm}
         containerClassName="absolute top-0 -right-4"
       />
-      <div
-        className={`${!minimap ? 'w-full' : ''} overflow-auto`}
-        ref={codeRef}
-      >
+      <div className={`w-full overflow-auto`} ref={codeRef}>
         <pre
           className={`prism-code language-${lang} bg-bg-sub my-0 w-full h-full`}
           onCopy={handleCopy}
@@ -421,109 +397,20 @@ const CodeFull = ({
             onRefDefClick={onRefDefClick}
             scrollToIndex={scrollToIndex}
             highlightColor={highlightColor}
+            isDiff={isDiff}
           />
-          <PortalContainer>
-            <AnimatePresence>
-              {popupPosition && (
-                <motion.div
-                  className="fixed z-[120]"
-                  style={popupPosition}
-                  initial={{ opacity: 0, transform: 'translateY(1rem)' }}
-                  animate={{ transform: 'translateY(0rem)', opacity: 1 }}
-                  exit={{ opacity: 0, transform: 'translateY(1rem)' }}
-                >
-                  <div className="bg-bg-base border border-bg-border rounded-md shadow-high flex overflow-hidden select-none">
-                    {codeToCopy.split('\n').length > 1000 ? (
-                      <button
-                        className="h-8 flex items-center justify-center gap-1 px-2 caption text-label-muted"
-                        disabled
-                      >
-                        <div className="w-4 h-4">
-                          <Info raw />
-                        </div>
-                        <Trans>Select less code</Trans>
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setChatOpen(true);
-                            setPopupPosition(null);
-                            setRightPanelOpen(false);
-                            setThreadId('');
-                            setConversation([]);
-                            setSelectedLines([
-                              currentSelection[0]![0],
-                              currentSelection[1]![0],
-                            ]);
-                            closePopup?.();
-                            setTimeout(
-                              () =>
-                                findElementInCurrentTab(
-                                  '#question-input',
-                                )?.focus(),
-                              300,
-                            );
-                          }}
-                          className="h-8 flex items-center justify-center gap-1 px-2 hover:bg-bg-base-hover border-r border-bg-border caption text-label-title"
-                        >
-                          <div className="w-4 h-4">
-                            <Feather raw />
-                          </div>
-                          <Trans>Ask bloop</Trans>
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setConversation([]);
-                            setThreadId('');
-                            setSelectedLines([
-                              currentSelection[0]![0] + 1,
-                              currentSelection[1]![0] + 1,
-                            ]);
-                            setRightPanelOpen(false);
-                            setSubmittedQuery(
-                              `#explain_${relativePath}:${
-                                currentSelection[0]![0] + 1
-                              }-${currentSelection[1]![0] + 1}`,
-                            );
-                            setChatOpen(true);
-                            setPopupPosition(null);
-                            closePopup?.();
-                          }}
-                          className="h-8 flex items-center justify-center gap-1 px-2 hover:bg-bg-base-hover caption text-label-title"
-                        >
-                          <div className="w-4 h-4">
-                            <Sparkle raw />
-                          </div>
-                          <Trans>Explain</Trans>
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </PortalContainer>
+          <ExplainButton
+            currentSelection={currentSelection}
+            popupPosition={popupPosition}
+            setPopupPosition={setPopupPosition}
+            closePopup={closePopup}
+            relativePath={relativePath}
+            selectedLinesLength={codeToCopy?.split('\n')?.length || 0}
+          />
         </pre>
       </div>
-      {minimap && (
-        <div className="w-36">
-          <MiniMap
-            code={code}
-            language={language}
-            codeFullHeight={scrollElement?.scrollHeight || 0}
-            codeVisibleHeight={scrollElement?.clientHeight || 0}
-            codeScroll={scrollPosition}
-            handleScroll={(v) => {
-              scrollElement?.scrollTo(0, v);
-            }}
-          />
-        </div>
-      )}
     </div>
   );
 };
 
-export default CodeFull;
+export default memo(CodeFull);

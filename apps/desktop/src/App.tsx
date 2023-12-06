@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api';
 import { open } from '@tauri-apps/api/shell';
 import { homeDir } from '@tauri-apps/api/path';
@@ -17,7 +18,7 @@ import { BrowserRouter } from 'react-router-dom';
 import ClientApp from '../../../client/src/App';
 import '../../../client/src/index.css';
 import useKeyboardNavigation from '../../../client/src/hooks/useKeyboardNavigation';
-import { getConfig } from '../../../client/src/services/api';
+import { getConfig, initApi } from '../../../client/src/services/api';
 import { LocaleContext } from '../../../client/src/context/localeContext';
 import i18n from '../../../client/src/i18n';
 import {
@@ -26,7 +27,12 @@ import {
   savePlainToStorage,
 } from '../../../client/src/services/storage';
 import { LocaleType } from '../../../client/src/types/general';
+import { polling } from '../../../client/src/utils/requestUtils';
+import ReportBugModal from '../../../client/src/components/ReportBugModal';
+import { UIContext } from '../../../client/src/context/uiContext';
+import { DeviceContextProvider } from '../../../client/src/context/providers/DeviceContextProvider';
 import TextSearch from './TextSearch';
+import SplashScreen from './SplashScreen';
 
 // let askedToUpdate = false;
 // let intervalId: number;
@@ -102,6 +108,9 @@ function App() {
   const [locale, setLocale] = useState<LocaleType>(
     (getPlainFromStorage(LANGUAGE_KEY) as LocaleType | null) || 'en',
   );
+  const [shouldShowSplashScreen, setShouldShowSplashScreen] = useState(true);
+  const [isBugReportModalOpen, setBugReportModalOpen] = useState(false);
+  const [serverCrashedMessage, setServerCrashedMessage] = useState('');
 
   useEffect(() => {
     i18n.changeLanguage(locale);
@@ -117,6 +126,13 @@ function App() {
   );
 
   useEffect(() => {
+    listen('server-crashed', (event) => {
+      console.log(event);
+      setBugReportModalOpen(true);
+      // @ts-ignore
+      setServerCrashedMessage(event.payload.message);
+    });
+
     homeDir().then(setHomeDir);
     Promise.all([
       tauriOs.arch(),
@@ -156,8 +172,25 @@ function App() {
   useKeyboardNavigation(handleKeyEvent);
 
   useEffect(() => {
-    setTimeout(() => getConfig().then(setEnvConfig), 1000); // server returns wrong tracking_id within first second
-  }, []);
+    let intervalId: number;
+    if (!Object.keys(envConfig).length) {
+      initApi('http://127.0.0.1:7878/api');
+      intervalId = polling(() => getConfig().then(setEnvConfig), 500);
+    } else {
+      // just in case config changed
+      setTimeout(() => {
+        getConfig().then((resp) =>
+          setEnvConfig((prev) =>
+            JSON.stringify(prev) === JSON.stringify(resp) ? prev : resp,
+          ),
+        );
+      }, 1000);
+      setShouldShowSplashScreen(false);
+    }
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [envConfig]);
 
   const deviceContextValue = useMemo(
     () => ({
@@ -186,12 +219,34 @@ function App() {
     }),
     [homeDirectory, indexFolder, os, release, envConfig],
   );
+
+  const bugReportContextValue = useMemo(
+    () => ({
+      isBugReportModalOpen,
+      setBugReportModalOpen,
+      activeTab: '',
+    }),
+    [isBugReportModalOpen],
+  );
+
   return (
     <LocaleContext.Provider value={localeContextValue}>
+      <AnimatePresence initial={false}>
+        {shouldShowSplashScreen && <SplashScreen />}
+      </AnimatePresence>
+      {shouldShowSplashScreen && (
+        <DeviceContextProvider deviceContextValue={deviceContextValue}>
+          <UIContext.BugReport.Provider value={bugReportContextValue}>
+            <ReportBugModal errorBoundaryMessage={serverCrashedMessage} />
+          </UIContext.BugReport.Provider>
+        </DeviceContextProvider>
+      )}
       <TextSearch contentRoot={contentContainer.current} />
       <div ref={contentContainer}>
         <BrowserRouter>
-          <ClientApp deviceContextValue={deviceContextValue} />
+          {!shouldShowSplashScreen && (
+            <ClientApp deviceContextValue={deviceContextValue} />
+          )}
         </BrowserRouter>
       </div>
     </LocaleContext.Provider>

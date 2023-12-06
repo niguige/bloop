@@ -1,7 +1,13 @@
 import { MouseEvent } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { ja, zhCN } from 'date-fns/locale';
-import { LocaleType, RepoType, RepoUi } from '../types/general';
+import { es, ja, zhCN } from 'date-fns/locale';
+import {
+  LocaleType,
+  ParsedQueryType,
+  ParsedQueryTypeEnum,
+  RepoType,
+  RepoUi,
+} from '../types/general';
 import langs from './langs.json';
 
 export const copyToClipboard = (value: string) => {
@@ -65,12 +71,33 @@ export const parseFilters = (input: string) => {
   return filters;
 };
 
-export const getFileExtensionForLang = (lang: string) => {
+export const getFileExtensionForLang = (lang: string, lowercased?: boolean) => {
   if (!lang) {
     return 'default';
   }
   // @ts-ignore
-  return 'index' + langs[lang]?.[0];
+  let ext = langs[lang]?.[0];
+  if (lowercased) {
+    const key = Object.keys(langs).find((key) => key.toLowerCase() === lang);
+    if (key) {
+      // @ts-ignore
+      ext = langs[key]?.[0];
+    }
+  }
+  return 'index' + (ext || `.${lang}`);
+};
+
+export const getPrettyLangName = (lang: string) => {
+  switch (lang) {
+    case 'js':
+    case 'jsx':
+      return 'JavaScript';
+    case 'ts':
+    case 'tsx':
+      return 'TypeScript';
+    default:
+      return Object.keys(langs).find((key) => key.toLowerCase() === lang);
+  }
 };
 
 export const isWindowsPath = (path: string) => path.includes('\\');
@@ -221,19 +248,9 @@ export const generateUniqueId = (): string => {
   return uuidv4();
 };
 
-export const propsAreShallowEqual = <P>(
-  prevProps: Readonly<P>,
-  nextProps: Readonly<P>,
-) =>
-  Object.keys(prevProps).every(
-    (k) =>
-      prevProps[k as keyof typeof prevProps] ===
-      nextProps[k as keyof typeof nextProps],
-  );
-
 export const deleteAuthCookie = () => {
   document.cookie =
-    'auth_cookie=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+    'X-Bleep-Cognito=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
 };
 
 export const previewTheme = (key: string) => {
@@ -328,13 +345,98 @@ export function humanFileSize(
   return bytes.toFixed(dp) + ' ' + units[u];
 }
 
+export function humanNumber(num: number) {
+  if (!num) {
+    return num;
+  }
+  if (num < 1000) {
+    return num.toString();
+  }
+  return `${parseFloat((num / 1000).toFixed(1))}k`;
+}
+
 export const getDateFnsLocale = (locale: LocaleType) => {
   switch (locale) {
     case 'ja':
       return { locale: ja };
     case 'zhCN':
       return { locale: zhCN };
+    case 'es':
+      return { locale: es };
     default:
       return undefined;
   }
 };
+
+export function mergeRanges(ranges: [number, number][]): [number, number][] {
+  ranges.sort((a, b) => a[0] - b[0]);
+
+  const mergedRanges: [number, number][] = [];
+
+  if (ranges.length === 0) {
+    return mergedRanges;
+  }
+
+  let currentRange = ranges[0];
+
+  for (let i = 1; i < ranges.length; i++) {
+    const nextRange = ranges[i];
+
+    if (nextRange[0] <= currentRange[1] + 1) {
+      currentRange[1] = Math.max(currentRange[1], nextRange[1]);
+    } else {
+      mergedRanges.push(currentRange);
+      currentRange = nextRange;
+    }
+  }
+
+  mergedRanges.push(currentRange);
+
+  return mergedRanges;
+}
+
+export function splitUserInputAfterAutocomplete(
+  input: string,
+): ParsedQueryType[] {
+  const pathRegex = /\|path:(.*?)\|/g;
+  const langRegex = /\|lang:(.*?)\|/g;
+  const combinedRegex = /\|(path|lang):(.*?)\|/g;
+  const result: ParsedQueryType[] = [];
+
+  let lastIndex = 0;
+
+  const addTextContent = (text: string) => {
+    if (text.length > 0) {
+      result.push({ type: ParsedQueryTypeEnum.TEXT, text });
+    }
+  };
+
+  input.replace(combinedRegex, (_, type, text, index) => {
+    addTextContent(input.substring(lastIndex, index));
+    result.push({
+      type:
+        type === 'lang' ? ParsedQueryTypeEnum.LANG : ParsedQueryTypeEnum.PATH,
+      text,
+    });
+    lastIndex = index + text.length + type.length + 3; // 3 is the length of "(type:"
+    return '';
+  });
+
+  addTextContent(input.substring(lastIndex));
+
+  return result;
+}
+
+export function concatenateParsedQuery(query: ParsedQueryType[]) {
+  let result = '';
+  query.forEach((q) => {
+    if (q.type === ParsedQueryTypeEnum.TEXT) {
+      result += q.text;
+    } else if (q.type === ParsedQueryTypeEnum.PATH) {
+      result += `|path:${q.text}|`;
+    } else if (q.type === ParsedQueryTypeEnum.LANG) {
+      result += `|lang:${q.text}|`;
+    }
+  });
+  return result;
+}

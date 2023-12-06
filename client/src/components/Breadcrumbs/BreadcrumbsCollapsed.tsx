@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import ContextMenu from '../ContextMenu';
+import ContextMenu, { ContextMenuItem } from '../ContextMenu';
 import { MenuItemType } from '../../types/general';
 import { MoreHorizontal } from '../../icons';
 import { PathParts } from './index';
@@ -25,17 +25,19 @@ const BreadcrumbsCollapsed = ({ items, type }: Props) => {
   const [isHiddenClicked, setIsHiddenClicked] = useState(false);
   const contextMenuItems = useMemo(
     () =>
-      items.map((part) => ({
-        icon: part.icon,
-        text: part.label,
-        onClick: part?.onClick,
-        type: MenuItemType.LINK,
-        underline: part.underline,
-      })),
+      items.map(
+        (part): ContextMenuItem => ({
+          icon: part.icon,
+          text: part.label,
+          onClick: part?.onClick,
+          type: MenuItemType.LINK,
+          underline: part.underline,
+        }),
+      ),
     [items],
   );
   return (
-    <span className="relative">
+    <span className="relative" onClick={(e) => e.stopPropagation()}>
       <ContextMenu
         items={contextMenuItems}
         visible={isHiddenClicked}

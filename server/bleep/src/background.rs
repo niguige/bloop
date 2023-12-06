@@ -1,16 +1,18 @@
+use once_cell::sync::OnceCell;
+use rayon::ThreadPool;
 use thread_priority::ThreadBuilderExt;
 use tokio::sync::Semaphore;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::{
-    repo::{BranchFilter, RepoRef, SyncStatus},
+    repo::{BranchFilterConfig, RepoRef, SyncStatus},
     Application, Configuration,
 };
 
 use std::{future::Future, pin::Pin, sync::Arc, thread};
 
 mod sync;
-pub(crate) use sync::SyncHandle;
+pub(crate) use sync::{SyncConfig, SyncHandle};
 
 mod control;
 pub(crate) use control::SyncPipes;
@@ -20,12 +22,21 @@ use notifyqueue::NotifyQueue;
 
 type ProgressStream = tokio::sync::broadcast::Sender<Progress>;
 
+static RAYON_POOL: OnceCell<ThreadPool> = OnceCell::new();
+
+/// Get a handle to a `tokio`-enabled `rayon` thread pool.
+pub fn rayon_pool() -> &'static ThreadPool {
+    RAYON_POOL
+        .get()
+        .expect("rayon thread pool was not yet initialized!")
+}
+
 #[derive(serde::Serialize, Clone)]
 pub struct Progress {
     #[serde(rename = "ref")]
     reporef: RepoRef,
     #[serde(rename = "b")]
-    branch_filter: Option<BranchFilter>,
+    branch_filter: Option<BranchFilterConfig>,
     #[serde(rename = "ev")]
     event: ProgressEvent,
 }
@@ -33,7 +44,7 @@ pub struct Progress {
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressEvent {
-    IndexPercent(u8),
+    IndexPercent(Option<u8>),
     StatusChange(SyncStatus),
 }
 
@@ -54,7 +65,6 @@ pub struct BackgroundExecutor {
     sender: flume::Sender<Task>,
 }
 
-pub struct BoundSyncQueue(pub(crate) Application, pub(crate) SyncQueue);
 impl BackgroundExecutor {
     fn start(config: Arc<Configuration>) -> Self {
         let (sender, receiver) = flume::unbounded();
@@ -70,12 +80,13 @@ impl BackgroundExecutor {
             .into();
 
         let tokio_ref = tokio.clone();
+
         // test can re-initialize the app, and we shouldn't fail
-        _ = rayon::ThreadPoolBuilder::new()
+        let rayon_pool = rayon::ThreadPoolBuilder::new()
             .spawn_handler(move |thread| {
                 let tokio_ref = tokio_ref.clone();
 
-                let thread_priority = if cfg!(feature = "ee") {
+                let thread_priority = if cfg!(feature = "ee-cloud") {
                     // 0-100 low-high
                     // pick mid-range for worker threads so we don't starve other threads
                     thread_priority::ThreadPriority::Crossplatform(49u8.try_into().unwrap())
@@ -93,7 +104,12 @@ impl BackgroundExecutor {
                     .map(|_| ())
             })
             .num_threads(config.max_threads)
-            .build_global();
+            .build()
+            .unwrap();
+
+        if RAYON_POOL.set(rayon_pool).is_err() {
+            panic!("rayon pool was already initialized!");
+        }
 
         thread::spawn(move || {
             while let Ok(task) = receiver.recv() {
@@ -158,7 +174,11 @@ impl SyncQueue {
                                 let result = next.run(permit).await;
                                 _ = active.remove(&next.reporef);
 
-                                debug!(?result, "sync finished");
+                                if result.is_ok() {
+                                    debug!(?result, "sync finished");
+                                } else {
+                                    error!(?result, "sync failed");
+                                }
                             });
                         }
                         Err((_, next)) => {
@@ -173,8 +193,8 @@ impl SyncQueue {
         instance
     }
 
-    pub fn bind(&self, app: Application) -> BoundSyncQueue {
-        BoundSyncQueue(app, self.clone())
+    pub fn broadcast(&self) -> tokio::sync::broadcast::Sender<Progress> {
+        self.progress.clone()
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Progress> {
@@ -187,7 +207,7 @@ impl SyncQueue {
             .scan_async(|_, handle| {
                 output.push(QueuedRepoStatus {
                     reporef: handle.reporef.clone(),
-                    branch_filter: handle.new_branch_filters.clone(),
+                    branch_filter: handle.filter_updates.branch_filter.clone(),
                     state: QueueState::Active,
                 });
             })
@@ -196,7 +216,7 @@ impl SyncQueue {
         for handle in self.queue.get_list().await {
             output.push(QueuedRepoStatus {
                 reporef: handle.reporef.clone(),
-                branch_filter: handle.new_branch_filters.clone(),
+                branch_filter: handle.filter_updates.branch_filter.clone(),
                 state: QueueState::Queued,
             });
         }
@@ -208,7 +228,7 @@ impl SyncQueue {
 #[derive(serde::Serialize, Debug)]
 pub(crate) struct QueuedRepoStatus {
     reporef: RepoRef,
-    branch_filter: Option<BranchFilter>,
+    branch_filter: Option<BranchFilterConfig>,
     state: QueueState,
 }
 
@@ -219,23 +239,35 @@ pub(crate) enum QueueState {
     Queued,
 }
 
+pub struct BoundSyncQueue(pub(crate) Application);
 impl BoundSyncQueue {
+    /// Enqueue repo for syncing
+    pub(crate) async fn enqueue(self, config: SyncConfig) {
+        self.0
+            .sync_queue
+            .queue
+            .push(config.into_handle().await)
+            .await;
+    }
+
     /// Enqueue repos for syncing with the current configuration.
     ///
     /// Skips any repositories in the list which are already queued or being synced.
     /// Returns the number of new repositories queued for syncing.
-    pub(crate) async fn enqueue_sync(self, repositories: Vec<RepoRef>) -> usize {
-        let mut num_queued = 0;
+    pub(crate) async fn enqueue_all(self, repositories: Vec<RepoRef>) -> usize {
+        let Self(app) = &self;
+        let jobs = &app.sync_queue;
 
+        let mut num_queued = 0;
         for reporef in repositories {
-            if self.1.queue.contains(&reporef).await || self.1.active.contains(&reporef) {
+            if jobs.queue.contains(&reporef).await || jobs.active.contains(&reporef) {
                 continue;
             }
 
             info!(%reporef, "queueing for sync");
-            let handle =
-                SyncHandle::new(self.0.clone(), reporef, self.1.progress.clone(), None).await;
-            self.1.queue.push(handle).await;
+            jobs.queue
+                .push(SyncConfig::new(app, reporef).into_handle().await)
+                .await;
             num_queued += 1;
         }
 
@@ -246,15 +278,21 @@ impl BoundSyncQueue {
     ///
     /// Returns the new status.
     pub(crate) async fn block_until_synced(self, reporef: RepoRef) -> anyhow::Result<SyncStatus> {
-        let handle = SyncHandle::new(self.0.clone(), reporef, self.1.progress.clone(), None).await;
+        let Self(app) = &self;
+        let jobs = &app.sync_queue;
+
+        let handle = SyncConfig::new(app, reporef).into_handle().await;
         let finished = handle.notify_done();
-        self.1.queue.push(handle).await;
+
+        jobs.queue.push(handle).await;
         Ok(finished.recv_async().await?)
     }
 
     pub(crate) async fn remove(self, reporef: RepoRef) -> Option<()> {
-        let active = self
-            .1
+        let Self(app) = &self;
+        let jobs = &app.sync_queue;
+
+        let active = jobs
             .active
             .update_async(&reporef, |_, v| {
                 v.pipes.remove();
@@ -263,19 +301,23 @@ impl BoundSyncQueue {
             .await;
 
         if active.is_none() {
-            self.0
-                .repo_pool
+            // Re-queue to the front, so clean any currently queued refs
+            jobs.queue.remove(reporef.clone()).await;
+            app.repo_pool
                 .update_async(&reporef, |_k, v| v.mark_removed())
                 .await?;
 
-            self.enqueue_sync(vec![reporef]).await;
+            jobs.queue
+                .push_front(SyncConfig::new(app, reporef).into_handle().await)
+                .await;
         }
 
         Some(())
     }
 
     pub(crate) async fn cancel(&self, reporef: RepoRef) {
-        self.1
+        self.0
+            .sync_queue
             .active
             .update_async(&reporef, |_, v| {
                 v.set_status(|_| SyncStatus::Cancelling);
@@ -285,12 +327,12 @@ impl BoundSyncQueue {
     }
 
     pub(crate) async fn startup_scan(self) -> anyhow::Result<()> {
-        let Self(Application { repo_pool, .. }, _) = &self;
+        let Self(Application { ref repo_pool, .. }) = self;
 
         let mut repos = vec![];
         repo_pool.scan_async(|k, _| repos.push(k.clone())).await;
 
-        self.enqueue_sync(repos).await;
+        self.enqueue_all(repos).await;
 
         Ok(())
     }
