@@ -2,7 +2,6 @@ use std::{collections::HashMap, mem, ops::Range, pin::pin};
 
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
-use rand::{rngs::OsRng, seq::SliceRandom};
 use tracing::{debug, info, instrument, trace};
 
 use crate::{
@@ -22,18 +21,18 @@ impl Agent {
         debug!("creating article response");
 
         if aliases.len() == 1 {
-            let path = self
+            let repo_path = self
                 .paths()
                 .nth(aliases[0])
                 .context("invalid path alias passed")?;
 
             let doc = self
-                .get_file_content(path)
+                .get_file_content(repo_path)
                 .await?
                 .context("path did not exist")?;
 
             self.update(Update::Focus(FocusedChunk {
-                file_path: path.to_owned(),
+                repo_path: repo_path.clone(),
                 start_line: 0,
                 end_line: doc.content.lines().count(),
             }))
@@ -41,16 +40,16 @@ impl Agent {
         }
 
         let context = self.answer_context(aliases).await?;
-        let system_prompt = (self.model.system_prompt)(&context);
+        let system_prompt = (self.answer_model.system_prompt)(&context);
         let system_message = llm_gateway::api::Message::system(&system_prompt);
         let history = {
             let h = self.utter_history().collect::<Vec<_>>();
             let system_headroom = tiktoken_rs::num_tokens_from_messages(
-                self.model.tokenizer,
+                self.answer_model.tokenizer,
                 &[(&system_message).into()],
             )?;
-            let headroom = self.model.answer_headroom + system_headroom;
-            trim_utter_history(h, headroom, self.model)?
+            let headroom = self.answer_model.answer_headroom + system_headroom;
+            trim_utter_history(h, headroom, self.answer_model)?
         };
         let messages = Some(system_message)
             .into_iter()
@@ -60,12 +59,14 @@ impl Agent {
         let mut stream = pin!(
             self.llm_gateway
                 .clone()
-                .model(self.model.model_name)
-                .frequency_penalty(if self.model.model_name == "gpt-3.5-turbo-finetuned" {
-                    Some(0.2)
-                } else {
-                    Some(0.0)
-                })
+                .model(self.answer_model.model_name)
+                .frequency_penalty(
+                    if self.answer_model.model_name == "gpt-3.5-turbo-finetuned" {
+                        Some(0.2)
+                    } else {
+                        Some(0.0)
+                    }
+                )
                 .chat_stream(&messages, None)
                 .await?
         );
@@ -75,32 +76,15 @@ impl Agent {
             let fragment = fragment?;
             response += &fragment;
 
-            let (article, summary) = transcoder::decode(&response);
+            let article = transcoder::decode(&response);
             self.update(Update::Article(article)).await?;
-
-            if let Some(summary) = summary {
-                self.update(Update::Conclude(summary)).await?;
-            }
         }
 
-        // We re-decode one final time to catch cases where `summary` is `None`, and to log the
-        // output as a trace.
-        let (article, summary) = transcoder::decode(&response);
-        let summary = summary.unwrap_or_else(|| {
-            [
-                "I hope that was useful, can I help with anything else?",
-                "Is there anything else I can help you with?",
-                "Can I help you with anything else?",
-            ]
-            .choose(&mut OsRng)
-            .copied()
-            .unwrap()
-            .to_owned()
-        });
+        if let Some(article) = self.last_exchange().answer() {
+            trace!(%article, "generated answer");
+        }
 
-        trace!(%article, "generated answer");
-
-        self.update(Update::Conclude(summary)).await?;
+        self.update(Update::SetTimestamp).await?;
 
         self.track_query(
             EventData::output_stage("answer_article")
@@ -108,7 +92,7 @@ impl Agent {
                 .with_payload("query_history", &history)
                 .with_payload("response", &response)
                 .with_payload("raw_prompt", &system_prompt)
-                .with_payload("model", self.model.model_name),
+                .with_payload("model", self.answer_model.model_name),
         );
 
         Ok(())
@@ -131,8 +115,13 @@ impl Agent {
 
         debug!(?paths, ?aliases, "created filtered path alias list");
 
+        s += "##### REPOS #####\n";
+        for repo in self.relevant_repos() {
+            s += &format!("{repo}\n");
+        }
+
         if !aliases.is_empty() {
-            s += "##### PATHS #####\n";
+            s += "\n##### PATHS #####\n";
 
             for alias in &aliases {
                 let path = &paths[*alias];
@@ -145,9 +134,9 @@ impl Agent {
         // Sometimes, there are just too many code chunks in the context, and deduplication still
         // doesn't trim enough chunks. So, we enforce a hard limit here that stops adding tokens
         // early if we reach a heuristic limit.
-        let bpe = tiktoken_rs::get_bpe_from_model(self.model.tokenizer)?;
+        let bpe = tiktoken_rs::get_bpe_from_model(self.answer_model.tokenizer)?;
         let mut remaining_prompt_tokens =
-            tiktoken_rs::get_completion_max_tokens(self.model.tokenizer, &s)?;
+            tiktoken_rs::get_completion_max_tokens(self.answer_model.tokenizer, &s)?;
 
         // Select as many recent chunks as possible
         let mut recent_chunks = Vec::new();
@@ -162,11 +151,11 @@ impl Agent {
                         acc
                     });
 
-            let formatted_snippet = format!("### {} ###\n{snippet}\n\n", chunk.path);
+            let formatted_snippet = format!("### {} ###\n{snippet}\n\n", chunk.repo_path);
 
             let snippet_tokens = bpe.encode_ordinary(&formatted_snippet).len();
 
-            if snippet_tokens >= remaining_prompt_tokens - self.model.prompt_headroom {
+            if snippet_tokens >= remaining_prompt_tokens - self.answer_model.prompt_headroom {
                 info!("breaking at {} tokens", remaining_prompt_tokens);
                 break;
             }
@@ -210,7 +199,8 @@ impl Agent {
     fn utter_history(&self) -> impl Iterator<Item = llm_gateway::api::Message> + '_ {
         const ANSWER_MAX_HISTORY_SIZE: usize = 5;
 
-        self.exchanges
+        self.conversation
+            .exchanges
             .iter()
             .rev()
             .take(ANSWER_MAX_HISTORY_SIZE)
@@ -221,10 +211,8 @@ impl Agent {
                     content: q,
                 });
 
-                let conclusion = e.answer().map(|(answer, conclusion)| {
-                    let encoded =
-                        transcoder::encode_summarized(answer, Some(conclusion), "gpt-4-0613")
-                            .unwrap();
+                let conclusion = e.answer().map(|answer| {
+                    let encoded = transcoder::encode_summarized(answer, "gpt-4-0613").unwrap();
 
                     llm_gateway::api::Message::PlainText {
                         role: "assistant".to_owned(),
@@ -237,7 +225,8 @@ impl Agent {
     }
 
     fn code_chunks(&self) -> impl Iterator<Item = CodeChunk> + '_ {
-        self.exchanges
+        self.conversation
+            .exchanges
             .iter()
             .flat_map(|e| e.code_chunks.iter().cloned())
     }
@@ -251,24 +240,24 @@ impl Agent {
         /// Making this closure to 1 means that more of the context is taken up by source code.
         const CONTEXT_CODE_RATIO: f32 = 0.5;
 
-        let bpe = tiktoken_rs::get_bpe_from_model(self.model.tokenizer).unwrap();
-        let context_size = tiktoken_rs::model::get_context_size(self.model.tokenizer);
+        let bpe = tiktoken_rs::get_bpe_from_model(self.answer_model.tokenizer).unwrap();
+        let context_size = tiktoken_rs::model::get_context_size(self.answer_model.tokenizer);
         let max_tokens = (context_size as f32 * CONTEXT_CODE_RATIO) as usize;
 
         // Note: The end line number here is *not* inclusive.
         let mut spans_by_path = HashMap::<_, Vec<_>>::new();
         for c in self.code_chunks().filter(|c| aliases.contains(&c.alias)) {
             spans_by_path
-                .entry(c.path.clone())
+                .entry(c.repo_path.clone())
                 .or_default()
                 .push(c.start_line..c.end_line);
         }
 
         // If there are no relevant code chunks, but there is a focused chunk, we use that.
         if spans_by_path.is_empty() {
-            if let Some(chunk) = &self.last_exchange().focused_chunk {
+            if let Some(ref chunk) = self.last_exchange().focused_chunk {
                 spans_by_path
-                    .entry(chunk.file_path.clone())
+                    .entry(chunk.repo_path.clone())
                     .or_default()
                     .push(chunk.start_line..chunk.end_line);
             }
@@ -281,7 +270,6 @@ impl Agent {
         let lines_by_file = futures::stream::iter(&mut spans_by_path)
             .then(|(path, spans)| async move {
                 spans.sort_by_key(|c| c.start);
-
                 let lines = self_
                     .get_file_content(path)
                     .await
@@ -332,7 +320,7 @@ impl Agent {
                     .iter_mut()
                     .flat_map(|(path, spans)| spans.iter_mut().map(move |s| (path, s)))
                 {
-                    let file_lines = lines_by_file.get(path.as_str()).unwrap().len();
+                    let file_lines = lines_by_file.get(path).unwrap().len();
 
                     let old_span = span.clone();
 
@@ -376,15 +364,17 @@ impl Agent {
         let code_chunks = spans_by_path
             .into_iter()
             .flat_map(|(path, spans)| spans.into_iter().map(move |s| (path.clone(), s)))
-            .map(|(path, span)| {
-                let snippet = lines_by_file.get(&path).unwrap()[span.clone()].join("\n");
+            .map(|(repo_path, span)| {
+                let snippet = lines_by_file.get(&repo_path).unwrap()[span.clone()].join("\n");
 
                 CodeChunk {
-                    alias: self.get_path_alias(&path),
-                    path,
-                    snippet,
+                    alias: self.get_path_alias(&repo_path),
                     start_line: span.start,
                     end_line: span.end,
+                    snippet,
+                    repo_path,
+                    start_byte: None,
+                    end_byte: None,
                 }
             })
             .collect::<Vec<CodeChunk>>();
@@ -397,10 +387,12 @@ impl Agent {
             let num_trimmed_lines = trimmed_snippet.lines().count();
             vec![CodeChunk {
                 alias: chunk.alias,
-                path: chunk.path.clone(),
+                repo_path: chunk.repo_path.clone(),
                 snippet: trimmed_snippet.to_string(),
                 start_line: chunk.start_line,
                 end_line: (chunk.start_line + num_trimmed_lines).saturating_sub(1),
+                start_byte: chunk.start_byte,
+                end_byte: chunk.end_byte,
             }]
         } else {
             code_chunks
@@ -412,7 +404,7 @@ impl Agent {
 fn trim_utter_history(
     mut history: Vec<llm_gateway::api::Message>,
     headroom: usize,
-    model: model::AnswerModel,
+    model: model::LLMModel,
 ) -> Result<Vec<llm_gateway::api::Message>> {
     let mut tiktoken_msgs: Vec<tiktoken_rs::ChatCompletionRequestMessage> =
         history.iter().map(|m| m.into()).collect::<Vec<_>>();

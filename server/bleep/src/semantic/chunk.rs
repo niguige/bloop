@@ -8,7 +8,7 @@ use crate::text_range::{Point, TextRange};
 use clap::{builder::PossibleValue, ValueEnum};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
-use tracing::{debug, error, warn};
+use tracing::{error, trace, warn};
 
 #[derive(Debug)]
 pub enum ChunkError {
@@ -155,6 +155,24 @@ impl Default for OverlapStrategy {
     }
 }
 
+/// Heuristics for determining if a chunk is noisy
+///
+/// We filter chunks where over 50% of non-whitespace tokens are numeric or punctuation
+fn is_noisy(chunk: &str) -> bool {
+    let non_whitespace_count = chunk.chars().filter(|c| !c.is_whitespace()).count();
+    let numeric_or_punctuation_count = chunk
+        .chars()
+        .filter(|c| c.is_numeric() || c.is_ascii_punctuation())
+        .count();
+
+    // Chunks that are all whitespace are noisy
+    if non_whitespace_count == 0 {
+        return true;
+    }
+
+    (numeric_or_punctuation_count as f64 / non_whitespace_count as f64) > 0.5
+}
+
 /// This should take care of [CLS], [SEP] etc. which could be introduced during per-chunk tokenization
 pub const DEDUCT_SPECIAL_TOKENS: usize = 2;
 
@@ -170,6 +188,11 @@ fn add_token_range<'s>(
     let end_byte = offsets.get(o.end).map_or(src.len(), |&(s, _)| s);
 
     if end_byte <= start_byte {
+        return;
+    }
+
+    if is_noisy(&src[start_byte..end_byte]) {
+        trace!("skipping noisy chunk");
         return;
     }
 
@@ -237,7 +260,7 @@ pub fn by_tokens<'s>(
     let max_tokens = token_bounds.end - DEDUCT_SPECIAL_TOKENS - repo_tokens;
     let max_newline_tokens = max_tokens * 3 / 4; //TODO: make this configurable
     let max_boundary_tokens = max_tokens * 7 / 8; //TODO: make this configurable
-    debug!("max tokens reduced to {max_tokens}");
+    trace!("max tokens reduced to {max_tokens}");
 
     let offsets_len = offsets.len() - 1;
     // remove the SEP token which has (0, 0) offsets for some reason

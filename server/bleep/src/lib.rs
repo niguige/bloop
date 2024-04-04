@@ -8,7 +8,7 @@
     unused_qualifications
 )]
 #![warn(unused_crate_dependencies)]
-#![allow(elided_lifetimes_in_paths)]
+#![allow(elided_lifetimes_in_paths, clippy::diverging_sub_expression)]
 
 #[cfg(all(feature = "onnx", feature = "metal"))]
 compile_error!("cannot enable `onnx` and `metal` at the same time");
@@ -425,7 +425,8 @@ fn tracing_subscribe(config: &Configuration) -> bool {
                 Targets::new()
                     .with_target("bleep", LevelFilter::DEBUG)
                     .with_target("bleep::indexes::file", LevelFilter::WARN)
-                    .with_target("bleep::semantic", LevelFilter::WARN),
+                    .with_target("bleep::semantic", LevelFilter::DEBUG)
+                    .with_target("bloop::qdrant", LevelFilter::INFO),
             )
     });
 

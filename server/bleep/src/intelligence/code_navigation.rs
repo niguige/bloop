@@ -7,6 +7,7 @@ use std::{collections::HashSet, ops::Not};
 use super::NodeKind;
 use crate::{
     indexes::reader::ContentDocument,
+    repo::RepoRef,
     snippet::{Snipper, Snippet},
     text_range::TextRange,
 };
@@ -18,6 +19,8 @@ use serde::Serialize;
 pub struct FileSymbols {
     /// The file to which the following occurrences belong
     pub file: String,
+
+    pub repo: RepoRef,
 
     /// A collection of symbol locations with context in this file
     pub data: Vec<Occurrence>,
@@ -50,6 +53,7 @@ pub struct CodeNavigationContext<'a, 'b> {
     pub token: Token<'a>,
     pub all_docs: &'b [ContentDocument],
     pub source_document_idx: usize,
+    pub snipper: Option<Snipper>,
 }
 
 impl<'a, 'b> CodeNavigationContext<'a, 'b> {
@@ -74,6 +78,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
             .flat_map_iter(|idx| {
                 let range = source_sg.graph[idx].range();
                 let token = Token {
+                    repo: source_doc.repo_ref.parse().unwrap(),
                     relative_path: &source_doc.relative_path,
                     start_byte: range.start.byte,
                     end_byte: range.end.byte,
@@ -130,10 +135,12 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
                     all_docs,
                     source_document_idx,
                     token: Token {
+                        repo: source_doc.repo_ref.parse().unwrap(),
                         relative_path: &source_doc.relative_path,
                         start_byte: source_sg.graph[idx].range().start.byte,
                         end_byte: source_sg.graph[idx].range().end.byte,
                     },
+                    snipper: None,
                 }
                 .local_definitions()
                 .is_none()
@@ -141,6 +148,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
             .flat_map_iter(|idx| {
                 let range = source_sg.graph[idx].range();
                 let token = Token {
+                    repo: source_doc.repo_ref.parse().unwrap(),
                     relative_path: &source_doc.relative_path,
                     start_byte: range.start.byte,
                     end_byte: range.end.byte,
@@ -179,6 +187,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
             all_docs: std::slice::from_ref(source_document),
             source_document_idx: 0,
             token,
+            snipper: None,
         }
     }
 
@@ -303,7 +312,11 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
             .map(|idx| Occurrence {
                 kind: OccurrenceKind::Definition,
                 range: scope_graph.graph[idx].range(),
-                snippet: to_occurrence(self.source_document(), scope_graph.graph[idx].range()),
+                snippet: to_occurrence(
+                    self.source_document(),
+                    scope_graph.graph[idx].range(),
+                    self.snipper,
+                ),
             })
             .collect::<Vec<_>>();
 
@@ -311,6 +324,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
 
         data.is_empty().not().then(|| FileSymbols {
             file: self.token.relative_path.to_owned(),
+            repo: self.token.repo.clone(),
             data,
         })
     }
@@ -335,7 +349,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
                     .map(|idx| Occurrence {
                         kind: OccurrenceKind::Definition,
                         range: scope_graph.graph[idx].range(),
-                        snippet: to_occurrence(doc, scope_graph.graph[idx].range()),
+                        snippet: to_occurrence(doc, scope_graph.graph[idx].range(), self.snipper),
                     })
                     .collect::<Vec<_>>();
 
@@ -343,6 +357,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
 
                 data.is_empty().not().then(|| FileSymbols {
                     file: doc.relative_path.to_owned(),
+                    repo: doc.repo_ref.parse().unwrap(),
                     data,
                 })
             })
@@ -360,7 +375,11 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
             .map(|idx| Occurrence {
                 kind: OccurrenceKind::Reference,
                 range: scope_graph.graph[idx].range(),
-                snippet: to_occurrence(self.source_document(), scope_graph.graph[idx].range()),
+                snippet: to_occurrence(
+                    self.source_document(),
+                    scope_graph.graph[idx].range(),
+                    self.snipper,
+                ),
             })
             .collect::<Vec<_>>();
 
@@ -371,6 +390,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
 
         data.is_empty().not().then(|| FileSymbols {
             file: self.token.relative_path.to_owned(),
+            repo: self.token.repo.clone(),
             data,
         })
     }
@@ -396,7 +416,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
                     .map(|idx| Occurrence {
                         kind: OccurrenceKind::Reference,
                         range: scope_graph.graph[idx].range(),
-                        snippet: to_occurrence(doc, scope_graph.graph[idx].range()),
+                        snippet: to_occurrence(doc, scope_graph.graph[idx].range(), self.snipper),
                     })
                     .collect::<Vec<_>>();
 
@@ -404,6 +424,7 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
 
                 data.is_empty().not().then(|| FileSymbols {
                     file: doc.relative_path.to_owned(),
+                    repo: doc.repo_ref.parse().unwrap(),
                     data,
                 })
             })
@@ -418,7 +439,11 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
             .map(|idx| Occurrence {
                 kind: OccurrenceKind::Definition,
                 range: scope_graph.graph[idx].range(),
-                snippet: to_occurrence(self.source_document(), scope_graph.graph[idx].range()),
+                snippet: to_occurrence(
+                    self.source_document(),
+                    scope_graph.graph[idx].range(),
+                    self.snipper,
+                ),
             })
             .collect::<Vec<_>>();
 
@@ -426,22 +451,25 @@ impl<'a, 'b> CodeNavigationContext<'a, 'b> {
 
         data.is_empty().not().then(|| FileSymbols {
             file: self.token.relative_path.to_owned(),
+            repo: self.token.repo.clone(),
             data,
         })
     }
 }
 
 pub struct Token<'a> {
+    pub repo: RepoRef,
     pub relative_path: &'a str,
     pub start_byte: usize,
     pub end_byte: usize,
 }
 
-fn to_occurrence(doc: &ContentDocument, range: TextRange) -> Snippet {
+fn to_occurrence(doc: &ContentDocument, range: TextRange, snipper: Option<Snipper>) -> Snippet {
     let src = &doc.content;
     let line_end_indices = &doc.line_end_indices;
     let highlight = range.start.byte..range.end.byte;
-    Snipper::default()
+    snipper
+        .unwrap_or_default()
         .expand(highlight, src, line_end_indices)
         .reify(src, &[])
 }
@@ -469,6 +497,7 @@ pub fn imported_ranges(
         .filter(|idx| source_sg.is_reference(*idx) || source_sg.is_import(*idx))
         .filter(|&idx| {
             let token = Token {
+                repo: source_document.repo_ref.parse().unwrap(),
                 relative_path: &source_document.relative_path,
                 start_byte: source_sg.graph[idx].range().start.byte,
                 end_byte: source_sg.graph[idx].range().end.byte,
@@ -480,6 +509,7 @@ pub fn imported_ranges(
         .flat_map(|idx| {
             let range = source_sg.graph[idx].range();
             let token = Token {
+                repo: source_document.repo_ref.parse().unwrap(),
                 relative_path: &source_document.relative_path,
                 start_byte: range.start.byte,
                 end_byte: range.end.byte,

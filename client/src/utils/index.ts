@@ -8,6 +8,7 @@ import {
   RepoType,
   RepoUi,
 } from '../types/general';
+import { PathParts } from '../components/Breadcrumbs';
 import langs from './langs.json';
 
 export const copyToClipboard = (value: string) => {
@@ -78,7 +79,7 @@ export const getFileExtensionForLang = (lang: string, lowercased?: boolean) => {
   // @ts-ignore
   let ext = langs[lang]?.[0];
   if (lowercased) {
-    const key = Object.keys(langs).find((key) => key.toLowerCase() === lang);
+    const key = Object.keys(langs).find((key) => key?.toLowerCase() === lang);
     if (key) {
       // @ts-ignore
       ext = langs[key]?.[0];
@@ -96,7 +97,7 @@ export const getPrettyLangName = (lang: string) => {
     case 'tsx':
       return 'TypeScript';
     default:
-      return Object.keys(langs).find((key) => key.toLowerCase() === lang);
+      return Object.keys(langs).find((key) => key?.toLowerCase() === lang);
   }
 };
 
@@ -121,21 +122,23 @@ export const splitPath = (path: string) =>
 export const splitPathForBreadcrumbs = (
   path: string,
   onClick?: (
-    e: MouseEvent<HTMLButtonElement>,
+    e: MouseEvent | null,
     item: string,
     index: number,
     arr: string[],
   ) => void,
-) => {
+): PathParts[] => {
   return splitPath(path)
     .filter((p) => p !== '/')
-    .map((item, index, arr) => ({
-      label: item,
-      onClick: (e: MouseEvent<HTMLButtonElement>) => {
-        e.preventDefault();
-        onClick?.(e, item, index, arr);
-      },
-    }));
+    .map(
+      (item, index, arr): PathParts => ({
+        label: item,
+        onClick: (e?: MouseEvent) => {
+          e?.preventDefault();
+          onClick?.(e || null, item, index, arr);
+        },
+      }),
+    );
 };
 
 export const buildRepoQuery = (
@@ -308,6 +311,26 @@ export const calculatePopupPositionInsideContainer = (
   return { top, left };
 };
 
+function getLineNumber(element: HTMLElement | null) {
+  while (element) {
+    if (element?.dataset?.['line-number'] || element?.dataset?.lineNumber) {
+      return element.dataset['line-number'] || element.dataset.lineNumber;
+    }
+    element = element.parentElement;
+  }
+  return null;
+}
+
+export function getSelectionLines(element: HTMLElement): null | number {
+  if (!element) {
+    return null;
+  }
+
+  const lineNumber = getLineNumber(element);
+
+  return lineNumber ? Number(lineNumber) : null;
+}
+
 export const escapeHtml = (unsafe: string) => {
   return unsafe
     .replaceAll('&', '&amp;')
@@ -400,7 +423,7 @@ export function splitUserInputAfterAutocomplete(
 ): ParsedQueryType[] {
   const pathRegex = /\|path:(.*?)\|/g;
   const langRegex = /\|lang:(.*?)\|/g;
-  const combinedRegex = /\|(path|lang):(.*?)\|/g;
+  const combinedRegex = /\|(path|lang|repo):(.*?)\|/g;
   const result: ParsedQueryType[] = [];
 
   let lastIndex = 0;
@@ -415,7 +438,11 @@ export function splitUserInputAfterAutocomplete(
     addTextContent(input.substring(lastIndex, index));
     result.push({
       type:
-        type === 'lang' ? ParsedQueryTypeEnum.LANG : ParsedQueryTypeEnum.PATH,
+        type === 'lang'
+          ? ParsedQueryTypeEnum.LANG
+          : type === 'repo'
+          ? ParsedQueryTypeEnum.REPO
+          : ParsedQueryTypeEnum.PATH,
       text,
     });
     lastIndex = index + text.length + type.length + 3; // 3 is the length of "(type:"
@@ -436,7 +463,29 @@ export function concatenateParsedQuery(query: ParsedQueryType[]) {
       result += `|path:${q.text}|`;
     } else if (q.type === ParsedQueryTypeEnum.LANG) {
       result += `|lang:${q.text}|`;
+    } else if (q.type === ParsedQueryTypeEnum.REPO) {
+      result += `|repo:${q.text}|`;
     }
   });
   return result;
 }
+
+type InputEditorTextContent = {
+  type: 'text';
+  text: string;
+};
+
+type InputEditorMentionContent = {
+  type: 'mention';
+  attrs: {
+    type: 'lang' | 'path' | 'repo';
+    id: string;
+    display: string;
+  };
+};
+
+export type InputEditorContent =
+  | InputEditorTextContent
+  | InputEditorMentionContent;
+
+export const noOp = () => {};

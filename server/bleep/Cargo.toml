@@ -1,6 +1,6 @@
 [package]
 name = "bleep"
-version = "0.5.10"
+version = "0.6.3"
 edition = "2021"
 default-run = "bleep"
 build = "build.rs"
@@ -42,7 +42,7 @@ harness = false
 tantivy = { version = "0.21.0", features = ["mmap"] }
 tantivy-columnar = "0.2.0"
 tokio = { version = "1.32.0", features = ["macros", "process", "rt", "rt-multi-thread", "io-std", "io-util", "sync", "fs"] }
-tokio-stream = "0.1.14"
+tokio-stream = { version = "0.1.14", features = ["sync"]}
 async-trait = "0.1.73"
 async-stream = "0.3.5"
 flume = "0.10.14"
@@ -85,6 +85,7 @@ tree-sitter-cpp = { git = "https://github.com/tree-sitter/tree-sitter-cpp", rev 
 tree-sitter-ruby = "0.20.0"
 tree-sitter-r = "0.19.5"
 tree-sitter-php = { git = "https://github.com/tree-sitter/tree-sitter-php" }
+tree-sitter-COBOL = { git = "https://github.com/nerdypepper/tree-sitter-cobol" }
 petgraph = { version = "0.6.4", default-features = false, features = ["serde-1"] }
 
 # webserver

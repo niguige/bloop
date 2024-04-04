@@ -25,12 +25,14 @@ import {
   getPlainFromStorage,
   LANGUAGE_KEY,
   savePlainToStorage,
+  USER_FONT_SIZE_KEY,
 } from '../../../client/src/services/storage';
 import { LocaleType } from '../../../client/src/types/general';
 import { polling } from '../../../client/src/utils/requestUtils';
 import ReportBugModal from '../../../client/src/components/ReportBugModal';
 import { UIContext } from '../../../client/src/context/uiContext';
 import { DeviceContextProvider } from '../../../client/src/context/providers/DeviceContextProvider';
+import { EnvContext } from '../../../client/src/context/envContext';
 import TextSearch from './TextSearch';
 import SplashScreen from './SplashScreen';
 
@@ -154,7 +156,8 @@ function App() {
   const handleKeyEvent = useCallback((e: KeyboardEvent) => {
     if (
       (e.key === '=' || e.key === '-' || e.key === '0') &&
-      (e.metaKey || e.ctrlKey)
+      (e.metaKey || e.ctrlKey) &&
+      !e.shiftKey
     ) {
       const root = document.querySelector(':root');
       if (!root) {
@@ -165,11 +168,37 @@ function App() {
         .getPropertyValue('font-size');
       const fontSize = parseFloat(style);
 
-      (root as HTMLElement).style.fontSize =
-        (e.key === '0' ? 16 : fontSize + (e.key === '=' ? 1 : -1)) + 'px';
+      const newFontSize =
+        e.key === '0' ? 16 : fontSize + (e.key === '=' ? 1 : -1);
+      (root as HTMLElement).style.fontSize = newFontSize + 'px';
+      savePlainToStorage(USER_FONT_SIZE_KEY, newFontSize);
     }
   }, []);
   useKeyboardNavigation(handleKeyEvent);
+
+  useEffect(() => {
+    const root = document.querySelector(':root');
+    if (!root) {
+      return;
+    }
+    const newFontSize = getPlainFromStorage(USER_FONT_SIZE_KEY);
+    if (newFontSize) {
+      (root as HTMLElement).style.fontSize = newFontSize + 'px';
+    }
+  }, []);
+
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      if (!import.meta.env.DEV) {
+        e.preventDefault();
+      }
+    };
+    document.addEventListener('contextmenu', onContextMenu);
+
+    return () => {
+      document.removeEventListener('contextmenu', onContextMenu);
+    };
+  }, []);
 
   useEffect(() => {
     let intervalId: number;
@@ -212,12 +241,18 @@ function App() {
       isRepoManagementAllowed: true,
       forceAnalytics: false,
       isSelfServe: false,
-      envConfig,
-      setEnvConfig,
       showNativeMessage: message,
       relaunch,
     }),
-    [homeDirectory, indexFolder, os, release, envConfig],
+    [homeDirectory, indexFolder, os, release],
+  );
+
+  const envContextValue = useMemo(
+    () => ({
+      envConfig,
+      setEnvConfig,
+    }),
+    [envConfig],
   );
 
   const bugReportContextValue = useMemo(
@@ -230,26 +265,32 @@ function App() {
   );
 
   return (
-    <LocaleContext.Provider value={localeContextValue}>
-      <AnimatePresence initial={false}>
-        {shouldShowSplashScreen && <SplashScreen />}
-      </AnimatePresence>
-      {shouldShowSplashScreen && (
-        <DeviceContextProvider deviceContextValue={deviceContextValue}>
-          <UIContext.BugReport.Provider value={bugReportContextValue}>
-            <ReportBugModal errorBoundaryMessage={serverCrashedMessage} />
-          </UIContext.BugReport.Provider>
-        </DeviceContextProvider>
-      )}
-      <TextSearch contentRoot={contentContainer.current} />
-      <div ref={contentContainer}>
-        <BrowserRouter>
-          {!shouldShowSplashScreen && (
-            <ClientApp deviceContextValue={deviceContextValue} />
+    <DeviceContextProvider
+      deviceContextValue={deviceContextValue}
+      envConfig={envConfig}
+    >
+      <EnvContext.Provider value={envContextValue}>
+        <LocaleContext.Provider value={localeContextValue}>
+          <AnimatePresence initial={false}>
+            {shouldShowSplashScreen && <SplashScreen />}
+          </AnimatePresence>
+          {shouldShowSplashScreen && (
+            <UIContext.BugReport.Provider value={bugReportContextValue}>
+              <ReportBugModal errorBoundaryMessage={serverCrashedMessage} />
+            </UIContext.BugReport.Provider>
           )}
-        </BrowserRouter>
-      </div>
-    </LocaleContext.Provider>
+          <TextSearch contentRoot={contentContainer.current} />
+          <div
+            ref={contentContainer}
+            className="w-screen h-screen overflow-hidden"
+          >
+            <BrowserRouter>
+              {!shouldShowSplashScreen && <ClientApp />}
+            </BrowserRouter>
+          </div>
+        </LocaleContext.Provider>
+      </EnvContext.Provider>
+    </DeviceContextProvider>
   );
 }
 

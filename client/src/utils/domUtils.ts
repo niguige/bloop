@@ -1,7 +1,7 @@
 export const findElementInCurrentTab = (
   selector: string,
 ): HTMLElement | null => {
-  return document.querySelector(`[data-active="true"] ${selector}`);
+  return document.querySelector(selector);
 };
 
 export const findAllElementsInCurrentTab = <
@@ -10,8 +10,23 @@ export const findAllElementsInCurrentTab = <
   selector: string,
   // eslint-disable-next-line no-undef
 ): NodeListOf<T> | null => {
-  return document.querySelectorAll(`[data-active="true"] ${selector}`);
+  return document.querySelectorAll(selector);
 };
 
-export const isFocusInInput = () =>
-  ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '');
+export const isFocusInInput = (ignoreCommandInput?: boolean) => {
+  const isInInput =
+    ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '') ||
+    (document.activeElement as HTMLElement)?.isContentEditable;
+  const isInCommandInput = document.activeElement?.id === 'command-input';
+  return ignoreCommandInput ? isInInput && !isInCommandInput : isInInput;
+};
+
+export const focusInput = () => {
+  findElementInCurrentTab('.ProseMirror')?.focus();
+  findElementInCurrentTab('.ReactMention textarea')?.focus();
+};
+
+export const blurInput = () => {
+  findElementInCurrentTab('.ProseMirror')?.blur();
+  findElementInCurrentTab('.ReactMention textarea')?.blur();
+};

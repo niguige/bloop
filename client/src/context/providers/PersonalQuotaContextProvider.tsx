@@ -11,6 +11,7 @@ import { getQuota } from '../../services/api';
 import { PersonalQuotaContext } from '../personalQuotaContext';
 import { DeviceContext } from '../deviceContext';
 import { polling } from '../../utils/requestUtils';
+import { EnvContext } from '../envContext';
 
 type Props = {};
 
@@ -19,14 +20,17 @@ export const PersonalQuotaContextProvider = memo(
     const [quota, setQuota] = useState({ used: 0, allowed: 10 });
     const [requestsLeft, setRequestsLeft] = useState(10);
     const [isSubscribed, setIsSubscribed] = useState(false);
+    const [isPastDue, setIsPastDue] = useState(false);
     const [hasCheckedQuota, setHasCheckedQuota] = useState(false);
     const [resetAt, setResetAt] = useState(new Date().toISOString());
-    const { isSelfServe, envConfig } = useContext(DeviceContext);
+    const { isSelfServe } = useContext(DeviceContext);
+    const { envConfig } = useContext(EnvContext);
 
     const refetchQuota = useCallback(async () => {
       if (!isSelfServe && envConfig.user_login) {
         const resp = await getQuota();
         setIsSubscribed(resp.upgraded);
+        setIsPastDue(resp.isPastDue);
         setQuota((prev) => {
           const newState = { used: resp.used, allowed: resp.allowed };
           if (JSON.stringify(prev) === JSON.stringify(newState)) {
@@ -56,10 +60,11 @@ export const PersonalQuotaContextProvider = memo(
         requestsLeft,
         quota,
         isSubscribed,
+        isPastDue,
         hasCheckedQuota,
         resetAt,
       }),
-      [requestsLeft, isSubscribed, hasCheckedQuota, quota, resetAt],
+      [requestsLeft, isSubscribed, isPastDue, hasCheckedQuota, quota, resetAt],
     );
 
     const handlersContextValue = useMemo(
